@@ -5,7 +5,7 @@
 ## Stack & version
 
 - Python 3.13 + CustomTkinter 5.2.2 · Tesseract OCR (local, offline, tha+eng) · SQLite
-- Current version: **v0.1.2** (3-place versioning per Nick, 2026-06-12) · releases: [github.com/nicksuksantr-pixel/OCR-Agentic-Ai](https://github.com/nicksuksantr-pixel/OCR-Agentic-Ai/releases)
+- Current version: **v0.1.3** (3-place versioning per Nick, 2026-06-12) · releases: [github.com/nicksuksantr-pixel/OCR-Agentic-Ai](https://github.com/nicksuksantr-pixel/OCR-Agentic-Ai/releases)
 - Gemini AI Boost: AI Studio key in `.env` (`GEMINI_API_KEY=...`), default model `gemini-3.1-flash-lite`, free-tier throttled (15 RPM / 500 RPD)
 
 ## Run / build
@@ -25,6 +25,7 @@
 .venv\Scripts\python.exe tests\smoke_tray.py       # close-to-tray / restore / quit
 .venv\Scripts\python.exe tests\smoke_rescue.py     # self-rescue: vertical/inverted/tiny text
 .venv\Scripts\python.exe tests\smoke_manage.py     # jobs browser: search/label/archive/export/overlay/pause-cancel
+.venv\Scripts\python.exe tests\smoke_lang.py       # auto language detect / batch resume / orphan cleanup
 ```
 
 - First-time setup: `python -m venv .venv` → `pip install -r requirements.txt` → Tesseract via `winget install UB-Mannheim.TesseractOCR` → language models already in `data\tessdata\` (eng/tha/osd).
@@ -34,7 +35,8 @@
 
 - **Scan (deep-detail)** — pick an image or PDF → preprocess (upscale to ≥2000 px) → dual full pass (block + sparse) + overlapping Sectioned Scan (3× zoom, dual pass per tile, grid auto-scales with image size up to 7×7) → stitched Raw Extract (text + positions + confidence). A PDF becomes one Job per page (rendered at 400 DPI via pypdfium2; source recorded as `path#page=N`). Deliberately slow and thorough (Nick's order, v0.0.8).
 - **Self-rescue (deep merge)** — sections below the quality bar (`rescue_trigger_conf` 75) run ALL local variants and merge the union: 4× zoom → Otsu binarize → sparse mode → inversion (white-on-black) → 90°/270° rotation (vertical labels). Below `low_conf_threshold` 60 they still queue for AI Boost. Rescued sections carry `rescued`/`rescue_method` in result.json.
-- **Live page streaming** — multi-page PDFs show each page's result the moment it finishes (Scan tab streams, Jobs list refreshes live); scans can be **paused/resumed/cancelled** mid-batch (finished pages are kept).
+- **Live page streaming** — multi-page PDFs show each page's result the moment it finishes (Scan tab streams, Jobs list refreshes live); scans can be **paused/resumed/cancelled** mid-batch (finished pages are kept). Re-picking a partially scanned PDF offers **batch resume** (skips finished pages); jobs orphaned by an app exit are auto-marked on next start.
+- **Auto language detect** — pages with no real Thai text re-run English-only, eliminating Thai-glyph hallucination on line drawings (`auto_language` setting, default on; `languages_used` recorded in result.json).
 - **Jobs browser** — scans grouped per Source file (a PDF's pages collapse into one expandable group), full-text **search** across all jobs, image **preview**, **overlay viewer** (word boxes coloured by confidence — green ≥75 / yellow ≥60 / red <60, saved as `overlay.png`), **open job folder / data folder** in Explorer, per-job **label/tag**, **export** a whole Source as `.txt`/`.json`, copy text, **archive** (folder moves to `jobs\_trash`, never deleted).
 - **Dashboard** — live library stats (jobs/avg confidence), current batch progress with ETA, AI Boost budget used today vs cap, queue counts. Auto-refreshes.
 - **AI Boost** — unclear sections queue on disk + DB; when online (and enabled in Settings) they are sent to Gemini one-by-one under free-tier limits and the answers are merged back into the Raw Extract (`[AI Boost]` block + `ai_boosts` in result.json). Auto-runs after each scan, or manually via Settings → "Send Boost Queue now".
@@ -43,7 +45,7 @@
 - **Local API for Open-Claw** — `http://127.0.0.1:8765`: `GET /health · /introduce · /jobs · /jobs/{id} · /jobs/{id}/result`, `POST /scan · /boost/run`. Localhost only.
 - **Self-introduction (handshake)** — `data\introduction.json` (refreshed every start) + `GET /introduce`: identity, Shared Store paths/schema, interfaces and conventions in one machine-readable document — Open-Claw self-configures from one read.
 - **Tray mode** — closing the window hides the app to the system tray; watcher + API keep serving Open-Claw. Tray menu: Open / Quit. Single-instance (mutex).
-- **Silent auto-update** — daily GitHub-Releases check (Settings → Updates: repo + toggle); a newer Setup is downloaded, SHA-256-verified, and installs silently when the app exits, then relaunches. One UAC popup per update (Program Files — Windows requirement).
+- **Silent auto-update** — GitHub-Releases check on every app start + "Check now" button (Settings → Updates: repo + toggle); a newer Setup is downloaded, SHA-256-verified, and installs silently when the app exits, then relaunches. One UAC popup per update (Program Files — Windows requirement).
 - **Data location** — dev runs use `<project>\data\`; installed (.exe) builds will use `%LOCALAPPDATA%\OCR-Agentic-Ai\` like a normal Windows program (`OCR_AGENTIC_DATA_DIR` overrides).
 - **Branding** — icon (scanning eye) = identity: taskbar/installer/shortcuts. Mascot "Scout" (one-eyed scanner robot, `assets\mascot.png`) = helper: Scan tab + installer wizard pages. Never swap roles (#3). Regenerate: `build\make_icon.py` / `build\make_mascot.py`.
 

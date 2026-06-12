@@ -42,6 +42,10 @@ def seed_job(page: int) -> int:
 
 def main() -> None:
     checks: dict[str, bool] = {}
+    # Idempotency: archive leftovers from previous runs of THIS test only,
+    # so grouping/export counts stay exact.
+    for old in store.search_jobs("smoke_manage.pdf"):
+        store.set_archived(old["id"], str(jobs_service.TRASH_DIR / "smoke_manage_old"))
     id1, id2 = seed_job(1), seed_job(2)
 
     # --- label + search ---

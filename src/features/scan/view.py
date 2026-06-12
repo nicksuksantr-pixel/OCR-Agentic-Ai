@@ -1,10 +1,12 @@
 """Scan tab UI — pick a Source, watch progress, read the stitched result. UI only."""
-from tkinter import filedialog
+from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
 from PIL import Image
 
 from src.core.config import paths
+from src.core.services import store
+from src.core.utils import pdfio
 from src.features.scan.controller import ScanController
 
 FILETYPES = [("Images / PDF", "*.png *.jpg *.jpeg *.bmp *.tif *.tiff *.webp *.pdf"),
@@ -50,10 +52,19 @@ class ScanView(ctk.CTkFrame):
             self.pick_btn.configure(state="disabled")
 
     def _pick(self) -> None:
-        """Open the file dialog and kick off a scan."""
+        """Open the file dialog and kick off a scan (offering batch resume)."""
         path = filedialog.askopenfilename(filetypes=FILETYPES)
         if not path:
             return
+        skip_pages = None
+        if pdfio.is_pdf(path):
+            done = store.done_pages(path.replace("\\", "/"))
+            done |= store.done_pages(path.replace("/", "\\"))
+            if done and messagebox.askyesno(
+                    "Resume batch",
+                    f"{len(done)} page(s) of this PDF are already scanned.\n\n"
+                    "Skip them and continue where it stopped?", parent=self):
+                skip_pages = done
         self.pick_btn.configure(state="disabled")
         self.pause_btn.configure(state="normal", text="⏸ Pause")
         self.cancel_btn.configure(state="normal")
@@ -66,6 +77,7 @@ class ScanView(ctk.CTkFrame):
             on_page_done=lambda r: self.after(0, self._show_page, r),
             on_done=lambda results: self.after(0, self._show_results, results),
             on_error=lambda msg: self.after(0, self._show_error, msg),
+            skip_pages=skip_pages,
         )
 
     def _set_status(self, msg: str) -> None:

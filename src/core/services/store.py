@@ -164,6 +164,31 @@ def set_archived(job_id: int, new_job_dir: str) -> None:
                     (new_job_dir, job_id))
 
 
+def done_pages(source_path: str) -> set[int]:
+    """Page numbers of a PDF Source already scanned successfully — lets an
+    interrupted batch resume instead of starting over."""
+    with _connect() as con:
+        rows = con.execute(
+            "SELECT source_path FROM jobs WHERE status='done' AND archived=0 "
+            "AND source_path LIKE ?", (source_path + "#page=%",)).fetchall()
+    pages = set()
+    for r in rows:
+        _, _, page = r["source_path"].partition("#page=")
+        if page.isdigit():
+            pages.add(int(page))
+    return pages
+
+
+def fail_orphans() -> int:
+    """App start: any job still 'processing' was cut off by a previous exit —
+    mark it errored so it stops looking alive. Returns how many were closed."""
+    with _connect() as con:
+        return con.execute(
+            "UPDATE jobs SET status='error', "
+            "error='interrupted — app closed during the scan' "
+            "WHERE status='processing'").rowcount
+
+
 def job_words(job_id: int) -> list[dict]:
     """All merged words of a job with positions — for the overlay viewer."""
     with _connect() as con:

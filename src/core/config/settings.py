@@ -27,6 +27,7 @@ class Settings:
     api_port: int = 8765              # API listens on 127.0.0.1:<port> — local machine only
     tray_enabled: bool = True         # closing the window hides to tray; watcher+API keep running
     auto_grid: bool = True            # scale the section grid with image size (configured grid = minimum, cap 7x7)
+    auto_language: bool = True        # drop the Thai pass on English-only pages (stops Thai glyph noise on drawings)
     rescue_enabled: bool = True       # unclear sections retry locally (4x zoom/binarize/sparse/rotate) before the Boost Queue
     auto_update: bool = True          # check GitHub Releases daily; silent install on app exit
     update_repo: str = "nicksuksantr-pixel/OCR-Agentic-Ai"  # GitHub update channel; empty disables

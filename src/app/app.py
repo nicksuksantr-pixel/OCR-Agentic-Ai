@@ -3,7 +3,7 @@ import customtkinter as ctk
 
 from src.core.config import paths
 from src.core.config import settings as settings_mod
-from src.core.services import introduce
+from src.core.services import introduce, store
 from src.features.api.service import ApiServer
 from src.features.boost.controller import BoostController
 from src.features.dashboard.view import DashboardView
@@ -16,7 +16,7 @@ from src.features.updater.service import AutoUpdater
 from src.features.watcher.service import InboxWatcher
 
 APP_NAME = "OCR Agentic AI"
-APP_VERSION = "v0.1.2"  # carry rule: 0.0.9 + 1 rolls the middle place
+APP_VERSION = "v0.1.3"  # carry rule: 0.0.9 + 1 rolls the middle place
 
 
 class App(ctk.CTk):
@@ -36,6 +36,7 @@ class App(ctk.CTk):
         self.settings = settings_mod.load()
         self.settings.save()  # materialize defaults so Nick can inspect/edit the JSON
         introduce.write_introduction(self.settings, APP_VERSION)  # handshake file for the Heart
+        orphans = store.fail_orphans()  # jobs cut off by a previous exit stop looking alive
         self.boost = BoostController(self.settings)
 
         tabs = ctk.CTkTabview(self)
@@ -78,11 +79,17 @@ class App(ctk.CTk):
                              on_quit=lambda: self.after(0, self._quit))
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
-        # Silent auto-update (GitHub Releases) — staged in background, installs on quit.
+        # Silent auto-update (GitHub Releases) — checks every start, staged in
+        # background, installs on quit. Settings gets a "Check now" hook.
         self.updater = AutoUpdater(
             self.settings, APP_VERSION,
             on_event=lambda msg: self.after(0, self.scan_view._set_status, msg))
+        self.settings_view.updater = self.updater
         self.updater.check_async()
+        if orphans:
+            self.after(0, self.scan_view._set_status,
+                       f"⚠ {orphans} interrupted job(s) from the last run marked error "
+                       "— re-pick the file to resume (finished pages are skipped).")
 
     def _on_close(self) -> None:
         """Window X button: hide to tray when enabled, otherwise quit for real."""

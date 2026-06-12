@@ -84,6 +84,15 @@ class SettingsView(ctk.CTkFrame):
         box.columnconfigure(1, weight=1)
         self._apply_paid_state()
 
+        ocr_box = ctk.CTkFrame(self)
+        ocr_box.pack(fill="x", padx=16, pady=8)
+        ctk.CTkLabel(ocr_box, text="🔠 OCR", font=ctk.CTkFont(weight="bold")).pack(
+            anchor="w", padx=12, pady=(10, 2))
+        self.auto_lang_var = ctk.BooleanVar(value=settings.auto_language)
+        ctk.CTkSwitch(ocr_box, text="Auto language detect — drop the Thai pass on "
+                                    "English-only pages (stops stray Thai glyph noise)",
+                      variable=self.auto_lang_var).pack(anchor="w", padx=12, pady=(0, 12))
+
         iface_box = ctk.CTkFrame(self)
         iface_box.pack(fill="x", padx=16, pady=8)
         ctk.CTkLabel(iface_box, text="🔌 Open-Claw interfaces (apply on next app start)",
@@ -121,6 +130,10 @@ class SettingsView(ctk.CTkFrame):
         self.repo_entry.grid(row=2, column=1, sticky="w", padx=(0, 12), pady=(4, 12))
         if settings.update_repo:
             self.repo_entry.insert(0, settings.update_repo)
+        self.updater = None  # attached by the App after construction
+        ctk.CTkButton(update_box, text="🔄 Check now", width=110,
+                      command=self._check_updates).grid(
+            row=2, column=2, sticky="w", padx=(0, 12), pady=(4, 12))
 
         queue_box = ctk.CTkFrame(self)
         queue_box.pack(fill="x", padx=16, pady=8)
@@ -148,6 +161,14 @@ class SettingsView(ctk.CTkFrame):
             if mid == model_id:
                 return display
         return next(d for d, m in MODELS.items() if m == FREE_MODEL)
+
+    def _check_updates(self) -> None:
+        """Manual update check — result lands on the Scan tab status line."""
+        if self.updater is None:
+            return
+        self.run_status.configure(
+            text="🔄 Checking for updates — result shows on the Scan tab status line.")
+        self.updater.check_async(manual=True)
 
     def _toggle_paid(self) -> None:
         """Unlocking requires explicit consent; declining flips the switch back."""
@@ -177,6 +198,7 @@ class SettingsView(ctk.CTkFrame):
             self.settings.boost_daily_cap = max(1, int(self.cap_entry.get()))
         except ValueError:
             pass  # keep the previous cap on bad input
+        self.settings.auto_language = self.auto_lang_var.get()
         self.settings.watch_inbox = self.watch_var.get()
         self.settings.api_enabled = self.api_var.get()
         self.settings.tray_enabled = self.tray_var.get()

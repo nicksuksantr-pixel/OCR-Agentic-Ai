@@ -1,8 +1,9 @@
 """Silent auto-update via GitHub Releases (Nick's choices, 2026-06-12).
 
 Flow (all offline-safe, never blocks scanning):
-  1. On app start a background thread checks the latest GitHub release
-     (throttled to once per day via data\\update_check.json).
+  1. On EVERY app start a background thread checks the latest GitHub release
+     (v0.1.3: the old once-per-day throttle made quit+reopen miss same-day
+     releases — one tiny API call per start is nothing).
   2. Newer tag found → the Setup exe asset is downloaded to %TEMP% and its
      SHA-256 verified against the matching .sha256 asset (built by build.ps1).
   3. The update is STAGED, not forced — it installs the moment the app exits
@@ -15,20 +16,16 @@ Disabled until Settings.update_repo is set (e.g. "nick/OCR-Agentic-Ai").
 """
 import hashlib
 import json
-import os
 import subprocess
 import sys
 import tempfile
 import threading
 import urllib.request
-from datetime import date
 from pathlib import Path
 
-from src.core.config import paths
 from src.core.config.settings import Settings
 
 ASSET_PREFIX = "OCR-Agentic-Ai_Setup_"   # release asset naming contract (build.ps1)
-CHECK_STATE_PATH = paths.DATA_DIR / "update_check.json"
 APP_EXE_NAME = "OCR-Agentic-Ai.exe"
 
 
@@ -109,35 +106,30 @@ class AutoUpdater:
 
     # --- checking ------------------------------------------------------------
 
-    def check_async(self, force: bool = False) -> None:
+    def check_async(self, manual: bool = False) -> None:
+        """Check the release channel in the background. `manual` (the Settings
+        "Check now" button) also reports the no-update/disabled outcomes."""
         if not (self.settings.auto_update and self.settings.update_repo.strip()):
+            if manual:
+                self.on_event("Updater is disabled (Settings → Updates).")
             return
-        threading.Thread(target=self._check, args=(force,), daemon=True,
+        threading.Thread(target=self._check, args=(manual,), daemon=True,
                          name="update-check").start()
 
-    def _already_checked_today(self) -> bool:
-        try:
-            state = json.loads(CHECK_STATE_PATH.read_text(encoding="utf-8"))
-            return state.get("date") == date.today().isoformat()
-        except (OSError, json.JSONDecodeError):
-            return False
-
-    def _mark_checked(self) -> None:
-        try:
-            CHECK_STATE_PATH.write_text(
-                json.dumps({"date": date.today().isoformat()}), encoding="utf-8")
-        except OSError:
-            pass
-
-    def _check(self, force: bool) -> None:
-        if not force and self._already_checked_today():
+    def _check(self, manual: bool) -> None:
+        if self.staged_setup:
+            if manual:
+                self.on_event("Update already staged — installs when you quit.")
             return
-        self._mark_checked()
         release = fetch_latest_release(self.settings.update_repo.strip())
         if not release:
+            if manual:
+                self.on_event("Update check failed — offline or repo unreachable.")
             return
         latest = release.get("tag_name", "")
         if parse_version(latest) <= parse_version(self.version):
+            if manual:
+                self.on_event(f"Up to date ({self.version} is the latest).")
             return
         setup, sha = pick_assets(release)
         if not setup:

@@ -44,3 +44,4 @@ class JobResult:
     sections: list[SectionResult] = field(default_factory=list)
     page: int | None = None              # 1-based page number when the Source is a PDF
     pages: int | None = None             # total pages of that PDF
+    languages_used: str | None = None    # actual OCR languages after auto-detect (additive, v0.1.3)

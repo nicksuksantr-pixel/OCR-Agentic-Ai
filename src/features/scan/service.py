@@ -23,6 +23,29 @@ RESCUE_ZOOM = 4.0   # rescue pass looks even closer before giving up to the Boos
 SPARSE_PSM = 11     # Tesseract sparse-text mode — scattered labels on drawings
 RESCUE_MIN_WORD_CONF = 45.0  # rescue-variant words below this are noise (esp. inverted runs)
 
+# Auto language detect (v0.1.3): tha+eng on a Latin-only drawing hallucinates
+# stray Thai glyphs ("ง เ ผ ..."). Real Thai text shows as multi-char words —
+# when a page has almost none, the whole page re-runs English-only.
+LATIN_ONLY_MIN_WORD_LEN = 3    # a "real" Thai word has at least this many chars
+LATIN_ONLY_MAX_COUNT = 3       # fewer real Thai words than this AND
+LATIN_ONLY_MAX_RATIO = 0.02    # below this share of confident words → eng only
+
+
+def _has_thai(text: str) -> bool:
+    return any("฀" <= ch <= "๿" for ch in text)  # Thai Unicode block
+
+
+def latin_only_page(words: list[Word]) -> bool:
+    """True when the first full pass shows no real Thai text — only glyph noise."""
+    confident = [w for w in words if w.conf >= 60]
+    if not confident:
+        return False  # nothing readable yet — keep both languages, sections decide
+    thai_real = [w for w in confident
+                 if _has_thai(w.text)
+                 and len("".join(w.text.split())) >= LATIN_ONLY_MIN_WORD_LEN]
+    return (len(thai_real) < LATIN_ONLY_MAX_COUNT
+            and len(thai_real) / len(confident) < LATIN_ONLY_MAX_RATIO)
+
 
 class ScanCancelled(Exception):
     """Raised inside the pipeline when the user cancels a running scan."""
@@ -64,14 +87,16 @@ class ScanControl:
 
 def run_source(source_path: str, settings: Settings,
                on_progress=lambda msg: None, on_page_done=None,
-               control: ScanControl | None = None) -> list[JobResult]:
+               control: ScanControl | None = None,
+               skip_pages: set[int] | None = None) -> list[JobResult]:
     """Process one Source of any supported kind. A PDF becomes one Job per page
     (source recorded as path#page=N); an image stays a single Job.
 
     `on_page_done(result)` fires after EACH Job finishes — multi-page PDFs
     stream results page by page instead of going silent for the whole batch.
     `control` enables pause/cancel; a cancel keeps every already-finished page
-    and returns the partial result list."""
+    and returns the partial result list. `skip_pages` resumes an interrupted
+    batch — those page numbers are not scanned again."""
     if not pdfio.is_pdf(source_path):
         try:
             result = run_job(source_path, settings, on_progress, control=control)
@@ -83,6 +108,9 @@ def run_source(source_path: str, settings: Settings,
     total = pdfio.page_count(source_path)
     results = []
     for i in range(total):
+        if skip_pages and (i + 1) in skip_pages:
+            on_progress(f"Page {i + 1}/{total} already scanned — skipped.")
+            continue
         on_progress(f"PDF page {i + 1}/{total}...")
         try:
             if control:
@@ -143,10 +171,17 @@ def _scan(source_path: str, job_dir: Path, job_id: int, settings: Settings,
     pre = imaging.preprocess(img, settings.upscale_min_side)
 
     on_progress("Full-image pass...")
-    full_words = engine.ocr_words(pre, settings.languages)
+    langs = settings.languages
+    full_words = engine.ocr_words(pre, langs)
+    if settings.auto_language and "tha" in langs and latin_only_page(full_words):
+        # English-only drawing: a tha+eng pass sprays stray Thai glyphs over the
+        # line work. Re-run clean — real Thai pages keep both languages.
+        langs = "eng"
+        on_progress("English-only page detected — dropping Thai pass...")
+        full_words = engine.ocr_words(pre, langs)
     # Second full pass in sparse-text mode — catches scattered drawing labels
     # the block-layout pass misses; stitch-dedupe removes the doubles.
-    full_words += engine.ocr_words(pre, settings.languages, psm=SPARSE_PSM)
+    full_words += engine.ocr_words(pre, langs, psm=SPARSE_PSM)
 
     rows, cols = ((settings.grid_rows, settings.grid_cols) if not settings.auto_grid
                   else imaging.auto_grid(pre.size, settings.grid_rows, settings.grid_cols))
@@ -159,8 +194,8 @@ def _scan(source_path: str, job_dir: Path, job_id: int, settings: Settings,
         on_progress(f"Section {idx + 1}/{len(boxes)}...")
         tile = imaging.crop_section(pre, box, zoom=SECTION_ZOOM)
         # Dual pass per tile too (block + sparse) — deep-detail mode.
-        raw = (engine.ocr_words(tile, settings.languages)
-               + engine.ocr_words(tile, settings.languages, psm=SPARSE_PSM))
+        raw = (engine.ocr_words(tile, langs)
+               + engine.ocr_words(tile, langs, psm=SPARSE_PSM))
         words = _dedupe([w.shifted(box[0], box[1], scale=SECTION_ZOOM) for w in raw])
         mean_conf = _mean_conf(words)
         status = "ok"
@@ -173,7 +208,7 @@ def _scan(source_path: str, job_dir: Path, job_id: int, settings: Settings,
         trigger = max(settings.rescue_trigger_conf, settings.low_conf_threshold)
         if not blank and settings.rescue_enabled and (not words or mean_conf < trigger):
             on_progress(f"Section {idx + 1}/{len(boxes)} rescue...")
-            r_words, r_conf, rescue_method = _rescue(pre, box, settings, words)
+            r_words, r_conf, rescue_method = _rescue(pre, box, langs, words)
             if r_words and r_conf > mean_conf:
                 words, mean_conf = r_words, r_conf
                 rescued = mean_conf >= settings.low_conf_threshold
@@ -196,11 +231,11 @@ def _scan(source_path: str, job_dir: Path, job_id: int, settings: Settings,
     return JobResult(
         job_id=job_id, source_path=source_path, job_dir=str(job_dir),
         full_text=_reading_order_text(merged), mean_conf=_mean_conf(merged),
-        words=merged, sections=sections,
+        words=merged, sections=sections, languages_used=langs,
     )
 
 
-def _rescue(pre, box, settings: Settings, base_words: list[Word]):
+def _rescue(pre, box, langs: str, base_words: list[Word]):
     """Self-rescue an unclear section — deep-detail mode: run EVERY variant and
     merge the union (no early stop; Nick: slower is fine, thoroughness wins).
 
@@ -224,7 +259,7 @@ def _rescue(pre, box, settings: Settings, base_words: list[Word]):
         (bw.rotate(90, expand=True), "rotate90", None, 90),   # vertical drawing labels
         (bw.rotate(270, expand=True), "rotate270", None, 270),
     ):
-        raw = engine.ocr_words(img, settings.languages, psm=psm)
+        raw = engine.ocr_words(img, langs, psm=psm)
         if angle:
             raw = [Word(w.text, w.conf, *imaging.unrotate_box((w.x, w.y, w.w, w.h),
                                                               angle, tile.size))
@@ -256,6 +291,7 @@ def _persist(result: JobResult, settings: Settings) -> None:
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "source_path": result.source_path,
         "languages": settings.languages,
+        "languages_used": result.languages_used or settings.languages,  # additive (v0.1.3)
         "mean_conf": result.mean_conf,
         "full_text": result.full_text,
         "words": [asdict(w) for w in result.words],

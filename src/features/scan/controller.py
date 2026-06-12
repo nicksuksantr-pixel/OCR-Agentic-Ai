@@ -25,9 +25,10 @@ class ScanController:
         return engine.configure(self.settings)
 
     def scan_file(self, path: str, on_progress, on_done, on_error,
-                  on_page_done=None) -> None:
+                  on_page_done=None, skip_pages: set[int] | None = None) -> None:
         """Start one Source in the background; on_page_done streams each finished
-        Job (PDF page) as it completes, on_done receives the full list at the end."""
+        Job (PDF page) as it completes, on_done receives the full list at the end.
+        skip_pages resumes an interrupted PDF batch."""
         if self.busy:
             on_error("A scan is already running.")
             return
@@ -47,7 +48,8 @@ class ScanController:
             try:
                 results = service.run_source(path, self.settings, on_progress,
                                              on_page_done=page_done,
-                                             control=self.control)
+                                             control=self.control,
+                                             skip_pages=skip_pages)
                 on_done(results)
             except Exception as exc:
                 on_error(str(exc))
