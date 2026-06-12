@@ -1,5 +1,6 @@
 """Scan controller — runs the pipeline on a worker thread and feeds the view callbacks."""
 import threading
+import time
 
 from src.core.config.settings import Settings
 from src.core.services import engine
@@ -7,11 +8,17 @@ from src.features.scan import service
 
 
 class ScanController:
-    """Bridges the Scan view and the pipeline; keeps the UI thread free."""
+    """Bridges the Scan view and the pipeline; keeps the UI thread free.
+
+    While a scan runs, `progress` holds a dict the Dashboard reads:
+    {source, done, pages, started} — done/pages update as pages stream in.
+    """
 
     def __init__(self, settings: Settings):
         self.settings = settings
         self.busy = False
+        self.control: service.ScanControl | None = None
+        self.progress: dict | None = None
 
     def engine_ready(self) -> str | None:
         """Configure the local engine; return an error message or None when ready."""
@@ -25,15 +32,45 @@ class ScanController:
             on_error("A scan is already running.")
             return
         self.busy = True
+        self.control = service.ScanControl()
+        self.progress = {"source": path, "done": 0, "pages": None,
+                         "started": time.time()}
+
+        def page_done(result):
+            if self.progress is not None:
+                self.progress["done"] = result.page or 1
+                self.progress["pages"] = result.pages or 1
+            if on_page_done:
+                on_page_done(result)
 
         def work():
             try:
                 results = service.run_source(path, self.settings, on_progress,
-                                             on_page_done=on_page_done)
+                                             on_page_done=page_done,
+                                             control=self.control)
                 on_done(results)
             except Exception as exc:
                 on_error(str(exc))
             finally:
                 self.busy = False
+                self.progress = None
 
         threading.Thread(target=work, daemon=True).start()
+
+    # --- pause / cancel (no-ops when nothing is running) ---
+
+    def pause(self) -> None:
+        if self.busy and self.control:
+            self.control.pause()
+
+    def resume(self) -> None:
+        if self.busy and self.control:
+            self.control.resume()
+
+    def cancel(self) -> None:
+        if self.busy and self.control:
+            self.control.cancel()
+
+    @property
+    def paused(self) -> bool:
+        return bool(self.busy and self.control and self.control.paused)

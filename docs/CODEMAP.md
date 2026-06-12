@@ -47,22 +47,41 @@
 - `src/features/boost/service.py`
     • `class BoostRunSummary` — What one drain run did — shown in the UI and logged.
     • `send_pending(settings, on_progress)` — Send every pending Boost Queue item to Gemini, oldest first, until done,
+    • `used_today()` — Public read of today's request count — shown on the Dashboard.
+
+### dashboard
+- `src/features/dashboard/view.py`
+    • `class DashboardView` — The Dashboard tab: three live boxes refreshed every couple of seconds.
 
 ### jobs
 - `src/features/jobs/service.py`
-    • `recent_jobs()` — Latest jobs for the list view.
+    • `recent_jobs(limit)` — Latest jobs for the list view.
+    • `grouped_jobs(limit)` — Jobs grouped by Source file — a PDF's pages collapse into one group.
+    • `page_of(job)` — Page number from a 'path#page=N' source, None for single images.
+    • `search(term)` — Jobs whose text, source path or label contains the term.
     • `job_detail(job_id)` — One job with its sections, for the detail pane.
     • `boost_pending()` — Count of sections waiting for AI Boost.
+    • `rename_job(job_id, label)` — Set/clear the user label shown in the job list.
+    • `open_data_folder()` — Open the Shared Store root in Explorer.
+    • `open_job_folder(job_id)` — Open one job's folder (original + crops + result.json) in Explorer.
+    • `archive_job(job_id)` — Hide a job and move its folder to jobs/_trash (recycle bin — never deleted).
+    • `original_image_path(job)` — The saved original image inside the job folder (original.*).
+    • `export_text(source, dest)` — Write every page of a Source as one .txt (page headers); returns page count.
+    • `export_json(source, dest)` — Combine every page's result.json of a Source into one .json list.
+    • `render_overlay(job_id, upscale_min_side)` — Draw word boxes (coloured by confidence) over the original image.
 - `src/features/jobs/view.py`
-    • `class JobsView` — The Jobs tab: refreshable job list (left) + detail viewer (right).
+    • `class JobsView` — The Jobs tab: grouped job list (left) + rich detail panel (right).
         ↳ refresh
 
 ### scan
 - `src/features/scan/controller.py`
     • `class ScanController` — Bridges the Scan view and the pipeline; keeps the UI thread free.
-        ↳ engine_ready, scan_file
+        ↳ engine_ready, scan_file, pause, resume, cancel, paused
 - `src/features/scan/service.py`
-    • `run_source(source_path, settings, on_progress, on_page_done)` — Process one Source of any supported kind. A PDF becomes one Job per page
+    • `class ScanCancelled` — Raised inside the pipeline when the user cancels a running scan.
+    • `class ScanControl` — Pause/cancel signalling for a running scan — checked between sections
+        ↳ pause, resume, cancel, paused, cancelled, checkpoint
+    • `run_source(source_path, settings, on_progress, on_page_done, control)` — Process one Source of any supported kind. A PDF becomes one Job per page
     • `run_job(source_path, settings, on_progress)` — Process one Source end-to-end and persist everything to the Shared Store.
 - `src/features/scan/view.py`
     • `class ScanView` — The Scan tab: select-file button + progress label + result textbox.

@@ -6,6 +6,7 @@ from src.core.config import settings as settings_mod
 from src.core.services import introduce
 from src.features.api.service import ApiServer
 from src.features.boost.controller import BoostController
+from src.features.dashboard.view import DashboardView
 from src.features.scan.controller import ScanController
 from src.features.scan.view import ScanView
 from src.features.jobs.view import JobsView
@@ -15,7 +16,7 @@ from src.features.updater.service import AutoUpdater
 from src.features.watcher.service import InboxWatcher
 
 APP_NAME = "OCR Agentic AI"
-APP_VERSION = "v0.1.1"  # carry rule: 0.0.9 + 1 rolls the middle place
+APP_VERSION = "v0.1.2"  # carry rule: 0.0.9 + 1 rolls the middle place
 
 
 class App(ctk.CTk):
@@ -41,13 +42,18 @@ class App(ctk.CTk):
         tabs.pack(fill="both", expand=True, padx=8, pady=8)
         scan_tab = tabs.add("Scan")
         jobs_tab = tabs.add("Jobs")
+        dash_tab = tabs.add("Dashboard")
         settings_tab = tabs.add("Settings")
 
-        self.scan_view = ScanView(scan_tab, ScanController(self.settings),
+        self.scan_controller = ScanController(self.settings)
+        self.scan_view = ScanView(scan_tab, self.scan_controller,
                                   on_job_done=self._after_scan)
         self.scan_view.pack(fill="both", expand=True)
-        self.jobs_view = JobsView(jobs_tab)
+        self.jobs_view = JobsView(jobs_tab, self.settings)
         self.jobs_view.pack(fill="both", expand=True)
+        self.dashboard_view = DashboardView(dash_tab, self.settings,
+                                            self.scan_controller)
+        self.dashboard_view.pack(fill="both", expand=True)
         self.settings_view = SettingsView(settings_tab, self.settings, self.boost)
         self.settings_view.pack(fill="both", expand=True)
 

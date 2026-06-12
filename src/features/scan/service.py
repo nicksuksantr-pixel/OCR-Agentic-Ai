@@ -4,6 +4,8 @@ This is the heart of the eyes: one Source in, maximum-detail Raw Extract out
 (result.json + DB rows + queued crops for AI Boost).
 """
 import json
+import threading
+import time
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
@@ -22,15 +24,59 @@ SPARSE_PSM = 11     # Tesseract sparse-text mode — scattered labels on drawing
 RESCUE_MIN_WORD_CONF = 45.0  # rescue-variant words below this are noise (esp. inverted runs)
 
 
+class ScanCancelled(Exception):
+    """Raised inside the pipeline when the user cancels a running scan."""
+
+
+class ScanControl:
+    """Pause/cancel signalling for a running scan — checked between sections
+    and between PDF pages, so the stop is clean (finished pages are kept)."""
+
+    def __init__(self):
+        self._pause = threading.Event()
+        self._cancel = threading.Event()
+
+    def pause(self) -> None:
+        self._pause.set()
+
+    def resume(self) -> None:
+        self._pause.clear()
+
+    def cancel(self) -> None:
+        self._cancel.set()
+        self._pause.clear()  # a paused scan must wake up to see the cancel
+
+    @property
+    def paused(self) -> bool:
+        return self._pause.is_set()
+
+    @property
+    def cancelled(self) -> bool:
+        return self._cancel.is_set()
+
+    def checkpoint(self) -> None:
+        """Block while paused; raise ScanCancelled once cancel is requested."""
+        while self._pause.is_set() and not self._cancel.is_set():
+            time.sleep(0.2)
+        if self._cancel.is_set():
+            raise ScanCancelled("scan cancelled by user")
+
+
 def run_source(source_path: str, settings: Settings,
-               on_progress=lambda msg: None, on_page_done=None) -> list[JobResult]:
+               on_progress=lambda msg: None, on_page_done=None,
+               control: ScanControl | None = None) -> list[JobResult]:
     """Process one Source of any supported kind. A PDF becomes one Job per page
     (source recorded as path#page=N); an image stays a single Job.
 
     `on_page_done(result)` fires after EACH Job finishes — multi-page PDFs
-    stream results page by page instead of going silent for the whole batch."""
+    stream results page by page instead of going silent for the whole batch.
+    `control` enables pause/cancel; a cancel keeps every already-finished page
+    and returns the partial result list."""
     if not pdfio.is_pdf(source_path):
-        result = run_job(source_path, settings, on_progress)
+        try:
+            result = run_job(source_path, settings, on_progress, control=control)
+        except ScanCancelled:
+            return []
         if on_page_done:
             on_page_done(result)
         return [result]
@@ -38,11 +84,16 @@ def run_source(source_path: str, settings: Settings,
     results = []
     for i in range(total):
         on_progress(f"PDF page {i + 1}/{total}...")
-        page_img = pdfio.render_page(source_path, i)
-        result = run_job(
-            f"{source_path}#page={i + 1}", settings,
-            on_progress=lambda m, p=i + 1: on_progress(f"Page {p}/{total}: {m}"),
-            image=page_img, page=i + 1, pages=total)
+        try:
+            if control:
+                control.checkpoint()
+            page_img = pdfio.render_page(source_path, i)
+            result = run_job(
+                f"{source_path}#page={i + 1}", settings,
+                on_progress=lambda m, p=i + 1: on_progress(f"Page {p}/{total}: {m}"),
+                image=page_img, page=i + 1, pages=total, control=control)
+        except ScanCancelled:
+            break  # finished pages stay valid; the cut-off job is marked error
         if on_page_done:
             on_page_done(result)
         results.append(result)
@@ -51,7 +102,8 @@ def run_source(source_path: str, settings: Settings,
 
 def run_job(source_path: str, settings: Settings,
             on_progress=lambda msg: None, *, image=None,
-            page: int | None = None, pages: int | None = None) -> JobResult:
+            page: int | None = None, pages: int | None = None,
+            control: ScanControl | None = None) -> JobResult:
     """Process one Source end-to-end and persist everything to the Shared Store.
 
     `image` lets a caller hand in an already-rendered PIL image (PDF pages);
@@ -61,7 +113,7 @@ def run_job(source_path: str, settings: Settings,
     job_id = store.create_job(source_path, str(job_dir), settings.languages)
     try:
         result = _scan(source_path, job_dir, job_id, settings, on_progress,
-                       image=image)
+                       image=image, control=control)
         result.page, result.pages = page, pages
         _persist(result, settings)
         return result
@@ -79,7 +131,7 @@ def _new_job_dir() -> Path:
 
 
 def _scan(source_path: str, job_dir: Path, job_id: int, settings: Settings,
-          on_progress, image=None) -> JobResult:
+          on_progress, image=None, control: ScanControl | None = None) -> JobResult:
     """The actual pipeline: full-image pass + per-section zoomed pass, then stitch."""
     on_progress("Loading image...")
     if image is not None:
@@ -102,6 +154,8 @@ def _scan(source_path: str, job_dir: Path, job_id: int, settings: Settings,
     sections: list[SectionResult] = []
     all_words: list[Word] = list(full_words)
     for idx, box in enumerate(boxes):
+        if control:
+            control.checkpoint()  # pause holds here; cancel raises ScanCancelled
         on_progress(f"Section {idx + 1}/{len(boxes)}...")
         tile = imaging.crop_section(pre, box, zoom=SECTION_ZOOM)
         # Dual pass per tile too (block + sparse) — deep-detail mode.

@@ -129,6 +129,11 @@ def _used_today() -> int:
     return _read_usage()["count"]
 
 
+def used_today() -> int:
+    """Public read of today's request count — shown on the Dashboard."""
+    return _used_today()
+
+
 def _count_request() -> None:
     usage = _read_usage()
     usage["count"] += 1

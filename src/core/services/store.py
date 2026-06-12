@@ -20,7 +20,9 @@ CREATE TABLE IF NOT EXISTS jobs (
     languages   TEXT NOT NULL,
     full_text   TEXT,
     mean_conf   REAL,
-    error       TEXT
+    error       TEXT,
+    label       TEXT,                                -- v0.1.2 additive: user-given name/tag
+    archived    INTEGER NOT NULL DEFAULT 0           -- v0.1.2 additive: 1 = hidden, folder in jobs/_trash
 );
 CREATE TABLE IF NOT EXISTS sections (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -52,11 +54,22 @@ CREATE TABLE IF NOT EXISTS boost_queue (
 """
 
 
+_migrated = False
+
+
 def _connect() -> sqlite3.Connection:
     """Open the Shared Store DB (created on first use), rows as dicts."""
+    global _migrated
     con = sqlite3.connect(paths.DB_PATH)
     con.row_factory = sqlite3.Row
     con.executescript(_SCHEMA)
+    if not _migrated:  # v0.1.2 additive columns for DBs created before them
+        cols = {r[1] for r in con.execute("PRAGMA table_info(jobs)")}
+        if "label" not in cols:
+            con.execute("ALTER TABLE jobs ADD COLUMN label TEXT")
+        if "archived" not in cols:
+            con.execute("ALTER TABLE jobs ADD COLUMN archived INTEGER NOT NULL DEFAULT 0")
+        _migrated = True
     return con
 
 
@@ -115,12 +128,65 @@ def queue_boost(job_id: int, section_id: int, crop_path: str, local_text: str) -
 
 
 def list_jobs(limit: int = 50) -> list[dict]:
-    """Latest jobs for the UI list, newest first."""
+    """Latest non-archived jobs for the UI list, newest first."""
     with _connect() as con:
         rows = con.execute(
-            "SELECT id, created_at, source_path, status, mean_conf FROM jobs ORDER BY id DESC LIMIT ?",
+            "SELECT id, created_at, source_path, status, mean_conf, label "
+            "FROM jobs WHERE archived=0 ORDER BY id DESC LIMIT ?",
             (limit,)).fetchall()
         return [dict(r) for r in rows]
+
+
+def search_jobs(term: str, limit: int = 200) -> list[dict]:
+    """Find non-archived jobs whose text, source or label contains `term`."""
+    like = f"%{term}%"
+    with _connect() as con:
+        rows = con.execute(
+            "SELECT id, created_at, source_path, status, mean_conf, label "
+            "FROM jobs WHERE archived=0 AND "
+            "(full_text LIKE ? OR source_path LIKE ? OR label LIKE ?) "
+            "ORDER BY id DESC LIMIT ?",
+            (like, like, like, limit)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def set_label(job_id: int, label: str) -> None:
+    """User-given name/tag for a job (empty clears it)."""
+    with _connect() as con:
+        con.execute("UPDATE jobs SET label=? WHERE id=?",
+                    (label.strip() or None, job_id))
+
+
+def set_archived(job_id: int, new_job_dir: str) -> None:
+    """Hide a job from all listings; its folder has been moved to jobs/_trash."""
+    with _connect() as con:
+        con.execute("UPDATE jobs SET archived=1, job_dir=? WHERE id=?",
+                    (new_job_dir, job_id))
+
+
+def job_words(job_id: int) -> list[dict]:
+    """All merged words of a job with positions — for the overlay viewer."""
+    with _connect() as con:
+        rows = con.execute(
+            "SELECT text, conf, x, y, w, h FROM words WHERE job_id=?", (job_id,)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def stats() -> dict:
+    """Library-wide numbers for the Dashboard tab."""
+    with _connect() as con:
+        row = con.execute(
+            "SELECT COUNT(*) AS total, "
+            "COALESCE(SUM(status='done'),0) AS done, "
+            "COALESCE(SUM(status='error'),0) AS error, "
+            "COALESCE(SUM(status='processing'),0) AS processing, "
+            "ROUND(AVG(CASE WHEN status='done' THEN mean_conf END),1) AS avg_conf "
+            "FROM jobs WHERE archived=0").fetchone()
+        boost = con.execute(
+            "SELECT COALESCE(SUM(status='pending'),0) AS pending, "
+            "COALESCE(SUM(status='answered'),0) AS answered FROM boost_queue").fetchone()
+        return {**dict(row), "boost_pending": boost["pending"],
+                "boost_answered": boost["answered"]}
 
 
 def get_job(job_id: int) -> dict | None:

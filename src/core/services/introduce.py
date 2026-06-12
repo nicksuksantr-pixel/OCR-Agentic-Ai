@@ -37,12 +37,14 @@ def build_introduction(settings: Settings, version: str) -> dict:
             "jobs_dir": str(paths.JOBS_DIR),
             "inbox_dir": str(paths.INBOX_DIR),
             "tables": {
-                "jobs": "one row per Source: status processing|done|error, full_text, mean_conf",
+                "jobs": "one row per Source: status processing|done|error, full_text, mean_conf; "
+                        "additive v0.1.2 columns: label (user tag), archived (1 = hidden, "
+                        "folder moved to jobs/_trash — archived jobs leave listings but rows persist)",
                 "sections": "Sectioned-Scan tiles: bbox, mean_conf, status ok|low_conf|queued|boosted|unreadable",
                 "words": "merged final words with x/y/w/h positions and 0-100 confidence",
                 "boost_queue": "unclear sections: status pending|sent|answered|failed, local_text, ai_text",
             },
-            "job_folder_layout": "jobs/job_NNNN/: original.<ext> + section_NN.png crops + result.json (full Raw Extract incl. ai_boosts). A PDF Source makes one job per page: source recorded as path#page=N, result.json gains additive page/pages fields, original.png is the rendered page",
+            "job_folder_layout": "jobs/job_NNNN/: original.<ext> + section_NN.png crops + result.json (full Raw Extract incl. ai_boosts). A PDF Source makes one job per page: source recorded as path#page=N, result.json gains additive page/pages fields, original.png is the rendered page. overlay.png (optional, additive) is a confidence-colored word-box render made on demand by the GUI",
         },
         "interfaces": {
             "watched_folder": {

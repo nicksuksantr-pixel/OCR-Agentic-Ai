@@ -29,6 +29,14 @@ class ScanView(ctk.CTkFrame):
         self.pick_btn = ctk.CTkButton(top, text="📄  Select image or PDF to scan",
                                       height=48, command=self._pick)
         self.pick_btn.pack(side="left", fill="x", expand=True)
+        self.pause_btn = ctk.CTkButton(top, text="⏸ Pause", width=92, height=48,
+                                       state="disabled", command=self._toggle_pause)
+        self.pause_btn.pack(side="left", padx=(8, 0))
+        self.cancel_btn = ctk.CTkButton(top, text="✖ Cancel", width=92, height=48,
+                                        state="disabled", fg_color="#8a3333",
+                                        hover_color="#a04040", command=self._cancel)
+        self.cancel_btn.pack(side="left", padx=(8, 0))
+        self._cancel_requested = False
 
         self.status = ctk.CTkLabel(self, text="Ready.", anchor="w")
         self.status.pack(fill="x", padx=16)
@@ -47,6 +55,9 @@ class ScanView(ctk.CTkFrame):
         if not path:
             return
         self.pick_btn.configure(state="disabled")
+        self.pause_btn.configure(state="normal", text="⏸ Pause")
+        self.cancel_btn.configure(state="normal")
+        self._cancel_requested = False
         self._set_status("Starting...")
         self.result_box.delete("1.0", "end")
         self.controller.scan_file(
@@ -74,12 +85,38 @@ class ScanView(ctk.CTkFrame):
             self.on_job_done(r)
 
     def _show_results(self, results) -> None:
-        """Whole Source finished — final summary (pages already streamed in)."""
-        jobs = ", ".join(str(r.job_id) for r in results)
-        conf = round(sum(r.mean_conf for r in results) / len(results), 1)
-        self._set_status(f"✅ All done — job(s) {jobs}, overall confidence {conf}%")
-        self.pick_btn.configure(state="normal")
+        """Whole Source finished (or cancelled) — final summary."""
+        if self._cancel_requested:
+            self._set_status(f"⏹ Cancelled — {len(results)} finished page(s) kept.")
+        elif results:
+            jobs = ", ".join(str(r.job_id) for r in results)
+            conf = round(sum(r.mean_conf for r in results) / len(results), 1)
+            self._set_status(f"✅ All done — job(s) {jobs}, overall confidence {conf}%")
+        else:
+            self._set_status("No pages produced.")
+        self._reset_buttons()
 
     def _show_error(self, msg: str) -> None:
         self._set_status(f"❌ {msg}")
+        self._reset_buttons()
+
+    def _reset_buttons(self) -> None:
         self.pick_btn.configure(state="normal")
+        self.pause_btn.configure(state="disabled", text="⏸ Pause")
+        self.cancel_btn.configure(state="disabled")
+
+    def _toggle_pause(self) -> None:
+        if self.controller.paused:
+            self.controller.resume()
+            self.pause_btn.configure(text="⏸ Pause")
+            self._set_status("Resumed.")
+        else:
+            self.controller.pause()
+            self.pause_btn.configure(text="▶ Resume")
+            self._set_status("⏸ Paused (finishing the current step)...")
+
+    def _cancel(self) -> None:
+        self._cancel_requested = True
+        self.controller.cancel()
+        self.pause_btn.configure(state="disabled")
+        self._set_status("Cancelling after the current step...")
