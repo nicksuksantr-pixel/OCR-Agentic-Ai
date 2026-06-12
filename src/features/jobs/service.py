@@ -196,6 +196,15 @@ def render_overlay(job_id: int, upscale_min_side: int) -> Path | None:
     if original is None:
         return None
     img = imaging.preprocess(Image.open(original), upscale_min_side).convert("RGB")
+    # v0.1.5: the scan may have turned the page upright before reading — word
+    # boxes live in that rotated space, so the overlay must rotate the same way.
+    try:
+        meta = json.loads((Path(job["job_dir"]) / "result.json").read_text(encoding="utf-8"))
+        rotation = int(meta.get("page_rotation", 0) or 0)
+    except (OSError, json.JSONDecodeError, ValueError):
+        rotation = 0
+    if rotation:
+        img = img.rotate(-rotation, expand=True)
     draw = ImageDraw.Draw(img)
     line = max(2, round(min(img.size) / 800))
     for word in store.job_words(job_id):

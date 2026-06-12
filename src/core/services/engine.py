@@ -50,6 +50,40 @@ def available_languages() -> list[str]:
         return []
 
 
+ROTATION_THUMB_SIDE = 2200   # rotation check runs on a thumbnail, not the full page
+ROTATION_MIN_MARGIN = 1.3    # a turned page must beat upright by this factor
+ROTATION_MIN_SCORE = 8.0     # and show real readable text, not noise
+
+
+def detect_rotation(img: Image.Image) -> int:
+    """Degrees CLOCKWISE (0/90/180/270) needed to make the page upright.
+
+    Drawing PDFs often carry a landscape sheet pre-rotated inside a portrait
+    page (MSBESB pages 4+) — every label comes out sideways and the local OCR
+    reads almost nothing. Tesseract's OSD guesses badly on sparse line work,
+    so this is EMPIRICAL: OCR a thumbnail at all four turns and keep the one
+    that actually reads best. 0 wins all ties (never rotate on a hunch).
+    """
+    thumb = img.copy()
+    thumb.thumbnail((ROTATION_THUMB_SIDE, ROTATION_THUMB_SIDE))
+
+    def score(im: Image.Image) -> float:
+        words = ocr_words(im, "eng", psm=11)  # sparse mode suits drawings
+        # confident multi-char words = evidence of a truly readable orientation
+        return sum(w.conf for w in words
+                   if w.conf >= 60 and len(w.text.strip()) >= 2) / 100.0
+
+    base = score(thumb)
+    best_angle, best = 0, base
+    for angle in (90, 180, 270):
+        s = score(thumb.rotate(-angle, expand=True))
+        if s > best:
+            best_angle, best = angle, s
+    if best_angle and best >= ROTATION_MIN_SCORE and best >= base * ROTATION_MIN_MARGIN:
+        return best_angle
+    return 0
+
+
 def ocr_words(img: Image.Image, languages: str, psm: int | None = None) -> list[Word]:
     """OCR one image → words with absolute pixel boxes and 0-100 confidence.
 

@@ -19,6 +19,7 @@ from src.core.services import engine, store
 from src.core.utils import imaging, pdfio
 
 SECTION_ZOOM = 3.0  # tiles are scanned at 3x — deep-detail mode (Nick: slower is fine)
+ZOOM_MAX_SIDE = 8000  # sanity cap: a zoomed tile never exceeds this side in px
 RESCUE_ZOOM = 4.0   # rescue pass looks even closer before giving up to the Boost Queue
 SPARSE_PSM = 11     # Tesseract sparse-text mode — scattered labels on drawings
 RESCUE_MIN_WORD_CONF = 45.0  # rescue-variant words below this are noise (esp. inverted runs)
@@ -120,10 +121,14 @@ def run_source(source_path: str, settings: Settings,
             if control:
                 control.checkpoint()
             page_img = pdfio.render_page(source_path, i)
+            # Real paper size measured BEFORE any scanning — it drives the
+            # Sectioned-Scan grid (A4 vs A0 must not split the same; Nick v0.1.5).
+            size_mm = pdfio.page_size_mm(source_path, i)
             result = run_job(
                 f"{source_path}#page={i + 1}", settings,
                 on_progress=lambda m, p=i + 1: on_progress(f"Page {p}/{total}: {m}"),
-                image=page_img, page=i + 1, pages=total, control=control)
+                image=page_img, page=i + 1, pages=total, control=control,
+                page_size_mm=size_mm)
         except ScanCancelled:
             break  # finished pages stay valid; the cut-off job is marked error
         if on_page_done:
@@ -135,17 +140,20 @@ def run_source(source_path: str, settings: Settings,
 def run_job(source_path: str, settings: Settings,
             on_progress=lambda msg: None, *, image=None,
             page: int | None = None, pages: int | None = None,
-            control: ScanControl | None = None) -> JobResult:
+            control: ScanControl | None = None,
+            page_size_mm: tuple[float, float] | None = None) -> JobResult:
     """Process one Source end-to-end and persist everything to the Shared Store.
 
     `image` lets a caller hand in an already-rendered PIL image (PDF pages);
     `source_path` is then a label like file.pdf#page=2, not an openable file.
+    `page_size_mm` = physical paper size (PDF pages); image files fall back to
+    their DPI metadata, and pixel heuristics only when nothing is known.
     """
     job_dir = _new_job_dir()
     job_id = store.create_job(source_path, str(job_dir), settings.languages)
     try:
         result = _scan(source_path, job_dir, job_id, settings, on_progress,
-                       image=image, control=control)
+                       image=image, control=control, page_size_mm=page_size_mm)
         result.page, result.pages = page, pages
         _persist(result, settings)
         return result
@@ -163,8 +171,10 @@ def _new_job_dir() -> Path:
 
 
 def _scan(source_path: str, job_dir: Path, job_id: int, settings: Settings,
-          on_progress, image=None, control: ScanControl | None = None) -> JobResult:
-    """The actual pipeline: full-image pass + per-section zoomed pass, then stitch."""
+          on_progress, image=None, control: ScanControl | None = None,
+          page_size_mm: tuple[float, float] | None = None) -> JobResult:
+    """The actual pipeline: orient → full pass → physical-size content grid →
+    per-section zoomed pass → seam pass → stitch."""
     on_progress("Loading image...")
     if image is not None:
         img = image
@@ -172,7 +182,20 @@ def _scan(source_path: str, job_dir: Path, job_id: int, settings: Settings,
     else:
         img = Image.open(source_path)
         img.save(job_dir / ("original" + Path(source_path).suffix.lower()))
+        if page_size_mm is None:
+            dpi = (img.info.get("dpi") or (0, 0))[0]
+            if dpi and dpi > 1:  # scanned images carry real DPI → real paper size
+                page_size_mm = (img.width / dpi * 25.4, img.height / dpi * 25.4)
     pre = imaging.preprocess(img, settings.upscale_min_side)
+
+    # Whole-page orientation FIRST — drawing PDFs often hold a landscape sheet
+    # rotated inside a portrait page; every later step needs upright text.
+    rotation = engine.detect_rotation(pre)
+    if rotation:
+        on_progress(f"Page is rotated {rotation}° — turning upright...")
+        pre = pre.rotate(-rotation, expand=True)
+        if rotation in (90, 270) and page_size_mm:
+            page_size_mm = (page_size_mm[1], page_size_mm[0])
 
     on_progress("Full-image pass...")
     langs = settings.languages
@@ -187,28 +210,34 @@ def _scan(source_path: str, job_dir: Path, job_id: int, settings: Settings,
     # the block-layout pass misses; stitch-dedupe removes the doubles.
     full_words += engine.ocr_words(pre, langs, psm=SPARSE_PSM)
 
-    # Grid only the area that actually has ink — not the empty paper margin.
-    cx0, cy0, cx1, cy1 = imaging.content_bbox(pre)
-    content_size = (cx1 - cx0, cy1 - cy0)
-    rows, cols = ((settings.grid_rows, settings.grid_cols) if not settings.auto_grid
-                  else imaging.auto_grid(content_size, settings.grid_rows, settings.grid_cols))
-    boxes = [(x + cx0, y + cy0, w, h)
-             for x, y, w, h in imaging.grid_sections(content_size, rows, cols,
-                                                     settings.overlap_pct)]
-    sections: list[SectionResult] = []
+    # Grid INSIDE the drawing frame (zone strips/borders are never tiled), with
+    # rows/cols decided by the real paper size whenever we know it.
+    interior = imaging.frame_interior(pre)
+    in_w, in_h = interior[2] - interior[0], interior[3] - interior[1]
+    if page_size_mm:
+        interior_mm = (in_w / pre.width * page_size_mm[0],
+                       in_h / pre.height * page_size_mm[1])
+        rows, cols = imaging.grid_from_mm(interior_mm)
+    elif settings.auto_grid:  # nothing measurable — pixel heuristic fallback
+        rows, cols = imaging.auto_grid((in_w, in_h),
+                                       settings.grid_rows, settings.grid_cols)
+    else:
+        rows, cols = settings.grid_rows, settings.grid_cols
+    boxes, x_cuts, y_cuts = imaging.smart_grid(pre, interior, rows, cols,
+                                               settings.overlap_pct)
+    tiles: list[dict] = []
     all_words: list[Word] = list(full_words)
     for idx, box in enumerate(boxes):
         if control:
             control.checkpoint()  # pause holds here; cancel raises ScanCancelled
         on_progress(f"Section {idx + 1}/{len(boxes)}...")
-        tile = imaging.crop_section(pre, box, zoom=SECTION_ZOOM)
+        zoom = _tile_zoom(box)
+        tile = imaging.crop_section(pre, box, zoom=zoom)
         # Dual pass per tile too (block + sparse) — deep-detail mode.
         raw = (engine.ocr_words(tile, langs)
                + engine.ocr_words(tile, langs, psm=SPARSE_PSM))
-        words = _dedupe([w.shifted(box[0], box[1], scale=SECTION_ZOOM) for w in raw])
+        words = _dedupe([w.shifted(box[0], box[1], scale=zoom) for w in raw])
         mean_conf = _mean_conf(words)
-        status = "ok"
-        crop_path = None
         rescued = False
         rescue_method = None
         ink = imaging.ink_ratio(tile)
@@ -224,29 +253,71 @@ def _scan(source_path: str, job_dir: Path, job_id: int, settings: Settings,
                 rescued = mean_conf >= settings.low_conf_threshold
             if not rescued:
                 rescue_method = None
-        # Frame/border tiles: nothing readable even after every rescue variant and
-        # almost no ink — that is a line, not text. No AI queue, no crop on disk.
-        line_only = not words and ink < LINE_ONLY_MAX_INK
-        unclear = (not blank and not line_only
-                   and (not words or mean_conf < settings.low_conf_threshold))
-        if unclear:
-            # Still unclear: keep the crop on disk for the AI Boost pass (CONTEXT invariant)
-            status = "unreadable" if not words else "low_conf"
-            crop_path = str(job_dir / f"section_{idx:02d}.png")
-            tile.save(crop_path)
-        sections.append(SectionResult(idx=idx, bbox=box, words=words,
-                                      mean_conf=mean_conf, status=status,
-                                      crop_path=crop_path, rescued=rescued,
-                                      rescue_method=rescue_method if rescued else None))
+        # Tiles that are only frame/table LINES: nothing readable after every
+        # rescue variant and the ink is straight ruled lines — not text. No AI
+        # queue, no crop on disk (empty table cells used to burn AI quota).
+        line_only = not words and (ink < LINE_ONLY_MAX_INK
+                                   or imaging.ruled_only(tile))
+        tiles.append(dict(idx=idx, box=box, zoom=zoom, blank=blank,
+                          line_only=line_only, rescued=rescued,
+                          rescue_method=rescue_method))
         all_words.extend(words)
+
+    # Seam pass — words sitting exactly on a grid cut are split across two
+    # tiles; a strip centred on every cut reads them whole, dedupe keeps the
+    # best copy (Nick: "สแกนระหว่างรอยต่อด้วยจะได้แม่นขึ้น").
+    strips = imaging.seam_strips(interior, x_cuts, y_cuts)
+    for n, strip in enumerate(strips):
+        if control:
+            control.checkpoint()
+        if imaging.ink_ratio(imaging.crop_section(pre, strip, zoom=1.0)) < BLANK_MAX_INK:
+            continue  # nothing crosses this seam
+        on_progress(f"Seam {n + 1}/{len(strips)}...")
+        zoom = _tile_zoom(strip)
+        seam_tile = imaging.crop_section(pre, strip, zoom=zoom)
+        raw = engine.ocr_words(seam_tile, langs, psm=SPARSE_PSM)
+        all_words.extend(w.shifted(strip[0], strip[1], scale=zoom) for w in raw
+                         if w.conf >= RESCUE_MIN_WORD_CONF)
 
     on_progress("Stitching...")
     merged = _dedupe(all_words)
+
+    # Section verdicts come AFTER the stitch, from the best merged knowledge —
+    # a tile that only saw half a label is fine when the seam pass or the full
+    # pass read that area confidently (no more queueing already-solved tiles).
+    sections: list[SectionResult] = []
+    for t in tiles:
+        bx, by, bw, bh = t["box"]
+        words_eff = [w for w in merged
+                     if bx <= w.x + w.w / 2 <= bx + bw
+                     and by <= w.y + w.h / 2 <= by + bh]
+        conf_eff = _mean_conf(words_eff)
+        status = "ok"
+        crop_path = None
+        if (not t["blank"] and not t["line_only"]
+                and (not words_eff or conf_eff < settings.low_conf_threshold)):
+            # Still unclear: keep the crop on disk for the AI Boost pass (CONTEXT invariant)
+            status = "unreadable" if not words_eff else "low_conf"
+            crop_path = str(job_dir / f"section_{t['idx']:02d}.png")
+            imaging.crop_section(pre, t["box"], zoom=t["zoom"]).save(crop_path)
+        sections.append(SectionResult(
+            idx=t["idx"], bbox=t["box"], words=words_eff, mean_conf=conf_eff,
+            status=status, crop_path=crop_path, rescued=t["rescued"],
+            rescue_method=t["rescue_method"] if t["rescued"] else None))
+
     return JobResult(
         job_id=job_id, source_path=source_path, job_dir=str(job_dir),
         full_text=_reading_order_text(merged), mean_conf=_mean_conf(merged),
         words=merged, sections=sections, languages_used=langs,
+        page_rotation=rotation, page_size_mm=page_size_mm,
     )
+
+
+def _tile_zoom(box: tuple[int, int, int, int]) -> float:
+    """Zoom for one tile: SECTION_ZOOM, eased off only when the zoomed tile
+    would exceed the ZOOM_MAX_SIDE sanity cap (huge physical-size tiles)."""
+    side = max(box[2], box[3]) or 1
+    return min(SECTION_ZOOM, max(1.0, ZOOM_MAX_SIDE / side))
 
 
 def _rescue(pre, box, langs: str, base_words: list[Word]):
@@ -306,6 +377,9 @@ def _persist(result: JobResult, settings: Settings) -> None:
         "source_path": result.source_path,
         "languages": settings.languages,
         "languages_used": result.languages_used or settings.languages,  # additive (v0.1.3)
+        "page_rotation": result.page_rotation,                          # additive (v0.1.5)
+        "page_size_mm": (list(result.page_size_mm)                      # additive (v0.1.5)
+                         if result.page_size_mm else None),
         "mean_conf": result.mean_conf,
         "full_text": result.full_text,
         "words": [asdict(w) for w in result.words],
@@ -325,21 +399,38 @@ def _mean_conf(words: list[Word]) -> float:
 
 
 def _dedupe(words: list[Word]) -> list[Word]:
-    """Merge duplicates from overlapping passes — same spot, keep the highest confidence."""
+    """Merge duplicates from overlapping passes — same spot, keep the highest
+    confidence. One exception (v0.1.5, the seam fix): a whole word arriving
+    after its own higher-confidence FRAGMENTS (a tile cut through the label,
+    pieces like "7 7" used to kill "SEAMWORD77") evicts those pieces instead
+    of dying as their "duplicate"."""
     kept: list[Word] = []
     for w in sorted(words, key=lambda w: -w.conf):
+        frags = [k for k in kept
+                 if _contains(w, k) and len(w.text) >= 1.5 * len(k.text)
+                 and w.conf >= k.conf - 15]
+        if frags:  # w is the whole word these pieces came from
+            kept = [k for k in kept if k not in frags]
         if not any(_overlaps(w, k) for k in kept):
             kept.append(w)
     return kept
 
 
-def _overlaps(a: Word, b: Word, thresh: float = 0.5) -> bool:
-    """True when two word boxes cover the same area (IoU over the smaller box)."""
+def _inter(a: Word, b: Word) -> int:
     ix = max(0, min(a.x + a.w, b.x + b.w) - max(a.x, b.x))
     iy = max(0, min(a.y + a.h, b.y + b.h) - max(a.y, b.y))
-    inter = ix * iy
+    return ix * iy
+
+
+def _overlaps(a: Word, b: Word, thresh: float = 0.5) -> bool:
+    """True when two word boxes cover the same area (IoU over the smaller box)."""
     smaller = min(a.w * a.h, b.w * b.h) or 1
-    return inter / smaller > thresh
+    return _inter(a, b) / smaller > thresh
+
+
+def _contains(outer: Word, inner: Word, frac: float = 0.7) -> bool:
+    """True when most of `inner`'s box lies inside `outer`'s box."""
+    return _inter(outer, inner) / ((inner.w * inner.h) or 1) >= frac
 
 
 def _reading_order_text(words: list[Word]) -> str:

@@ -45,3 +45,5 @@ class JobResult:
     page: int | None = None              # 1-based page number when the Source is a PDF
     pages: int | None = None             # total pages of that PDF
     languages_used: str | None = None    # actual OCR languages after auto-detect (additive, v0.1.3)
+    page_rotation: int = 0               # degrees CW the page was turned to be upright (additive, v0.1.5)
+    page_size_mm: tuple[float, float] | None = None  # physical paper size driving the grid (additive, v0.1.5)

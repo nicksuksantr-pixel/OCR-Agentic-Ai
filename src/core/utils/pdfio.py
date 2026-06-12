@@ -28,6 +28,20 @@ def page_count(path: str | Path) -> int:
         pdf.close()
 
 
+def page_size_mm(path: str | Path, index: int) -> tuple[float, float]:
+    """Physical page size (width_mm, height_mm) WITHOUT rendering — measured
+    before every scan so the Sectioned-Scan grid is computed from the real
+    paper size (A4 vs A0), not from arbitrary pixel counts (Nick, v0.1.5)."""
+    pdf = pdfium.PdfDocument(str(path))
+    try:
+        page = pdf[index]
+        w_pt, h_pt = page.get_size()
+        page.close()
+        return (w_pt / 72.0 * 25.4, h_pt / 72.0 * 25.4)
+    finally:
+        pdf.close()
+
+
 def render_page(path: str | Path, index: int, dpi: int = PDF_DPI) -> Image.Image:
     """Render one page (0-based) to a grayscale-friendly RGB image."""
     pdf = pdfium.PdfDocument(str(path))
