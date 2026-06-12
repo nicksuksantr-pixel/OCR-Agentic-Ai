@@ -164,6 +164,23 @@ def set_archived(job_id: int, new_job_dir: str) -> None:
                     (new_job_dir, job_id))
 
 
+def delete_job(job_id: int) -> None:
+    """Permanently remove one job and ALL its rows (user-confirmed delete)."""
+    with _connect() as con:
+        con.execute("DELETE FROM boost_queue WHERE job_id=?", (job_id,))
+        con.execute("DELETE FROM words WHERE job_id=?", (job_id,))
+        con.execute("DELETE FROM sections WHERE job_id=?", (job_id,))
+        con.execute("DELETE FROM jobs WHERE id=?", (job_id,))
+
+
+def archived_jobs() -> list[dict]:
+    """Jobs sitting in the trash (archived=1) — for Empty-trash."""
+    with _connect() as con:
+        rows = con.execute(
+            "SELECT id, job_dir FROM jobs WHERE archived=1").fetchall()
+        return [dict(r) for r in rows]
+
+
 def done_pages(source_path: str) -> set[int]:
     """Page numbers of a PDF Source already scanned successfully — lets an
     interrupted batch resume instead of starting over."""

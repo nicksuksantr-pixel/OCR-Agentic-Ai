@@ -65,6 +65,10 @@
     • `open_data_folder()` — Open the Shared Store root in Explorer.
     • `open_job_folder(job_id)` — Open one job's folder (original + crops + result.json) in Explorer.
     • `archive_job(job_id)` — Hide a job and move its folder to jobs/_trash (recycle bin — never deleted).
+    • `delete_job(job_id)` — Permanently delete one job: folder gone, all DB rows gone (user-confirmed).
+    • `delete_source(source)` — Permanently delete every page-job of one Source file; returns the count.
+    • `source_job_count(source)` — How many active jobs belong to one Source file.
+    • `empty_trash()` — Permanently delete everything that was archived (folders in jobs/_trash
     • `original_image_path(job)` — The saved original image inside the job folder (original.*).
     • `export_text(source, dest)` — Write every page of a Source as one .txt (page headers); returns page count.
     • `export_json(source, dest)` — Combine every page's result.json of a Source into one .json list.

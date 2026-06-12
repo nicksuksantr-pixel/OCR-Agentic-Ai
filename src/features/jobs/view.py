@@ -40,6 +40,8 @@ class JobsView(ctk.CTkFrame):
                       command=self._clear_search).pack(side="left", padx=(4, 0))
         ctk.CTkButton(bar, text="📂 Data folder", width=120,
                       command=service.open_data_folder).pack(side="left", padx=(12, 0))
+        ctk.CTkButton(bar, text="🧹 Empty trash", width=110,
+                      command=self._empty_trash).pack(side="left", padx=(8, 0))
         self.boost_label = ctk.CTkLabel(bar, text="", anchor="e")
         self.boost_label.pack(side="right")
 
@@ -73,9 +75,12 @@ class JobsView(ctk.CTkFrame):
                           ("📋 Copy text", self._copy_text),
                           ("📤 Export .txt", lambda: self._export("txt")),
                           ("📤 .json", lambda: self._export("json")),
-                          ("🗑 Archive", self._archive)):
+                          ("🗂 Archive", self._archive)):
             ctk.CTkButton(btn_row, text=text, width=10, command=cmd).pack(
                 side="left", padx=(0, 6))
+        ctk.CTkButton(btn_row, text="🗑 Delete", width=10, fg_color="#8a3333",
+                      hover_color="#a04040", command=self._delete).pack(
+            side="left", padx=(0, 6))
 
         self.preview_label = ctk.CTkLabel(panel, text="")
         self.preview_label.grid(row=3, column=0, padx=12, pady=(2, 4))
@@ -238,12 +243,56 @@ class JobsView(ctk.CTkFrame):
                 "folder moves to jobs\\_trash (nothing is deleted).", parent=self):
             return
         service.archive_job(job["id"])
+        self._clear_detail("🗂 Job archived (folder in jobs\\_trash — Empty trash removes it for good).")
+        self.refresh()
+
+    def _delete(self) -> None:
+        """Permanently delete this job — or every page of its file at once."""
+        job = self._need_job()
+        if not job:
+            return
+        source = job["source_path"].split("#page=")[0]
+        name = source.replace("\\", "/").rsplit("/", 1)[-1]
+        count = service.source_job_count(source)
+        if count > 1:
+            answer = messagebox.askyesnocancel(
+                "Delete",
+                f'"{name}" has {count} scanned page(s).\n\n'
+                f'Yes  = delete ALL {count} pages of this file\n'
+                f'No   = delete only job #{job["id"]} (this page)\n'
+                "Cancel = keep everything\n\n"
+                "Deleted jobs and their folders are gone for good.", parent=self)
+            if answer is None:
+                return
+            removed = service.delete_source(source) if answer else (
+                service.delete_job(job["id"]) or 1)
+        else:
+            if not messagebox.askyesno(
+                    "Delete", f'Permanently delete job #{job["id"]} ({name})?\n'
+                    "Its folder and data are gone for good.", parent=self):
+                return
+            service.delete_job(job["id"])
+            removed = 1
+        self._clear_detail(f"🗑 Deleted {removed} job(s).")
+        self.refresh()
+
+    def _empty_trash(self) -> None:
+        """Purge everything previously archived (folders + hidden rows)."""
+        if not messagebox.askyesno(
+                "Empty trash", "Permanently delete ALL archived jobs "
+                "(jobs\\_trash)?\nThis cannot be undone.", parent=self):
+            return
+        purged = service.empty_trash()
+        self.info_label.configure(text=f"🧹 Trash emptied — {purged} job(s) purged.")
+        self.refresh()
+
+    def _clear_detail(self, message: str) -> None:
         self.current_job = None
-        self.info_label.configure(text="Job archived (folder in jobs\\_trash).")
+        self.info_label.configure(text=message)
         self.preview_label.configure(image=None, text="")
         self._preview_image = None
+        self.label_entry.delete(0, "end")
         self.detail.delete("1.0", "end")
-        self.refresh()
 
     def _overlay(self) -> None:
         """Render word boxes coloured by confidence and show them in a window."""

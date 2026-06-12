@@ -16,6 +16,22 @@ def preprocess(img: Image.Image, upscale_min_side: int) -> Image.Image:
     return gray
 
 
+def content_bbox(img: Image.Image, pad_pct: float = 0.01,
+                 dark_threshold: int = 200) -> tuple[int, int, int, int]:
+    """Bounding box (x0, y0, x1, y1) of the actual ink on a page, padded a bit.
+
+    Lets the Sectioned Scan grid cover the drawing instead of the empty paper
+    margin around it. Falls back to the full image when the page is blank.
+    """
+    gray = img if img.mode == "L" else img.convert("L")
+    box = gray.point(lambda p: 255 if p < dark_threshold else 0).getbbox()
+    if box is None:
+        return (0, 0, img.width, img.height)
+    pad_x, pad_y = round(img.width * pad_pct), round(img.height * pad_pct)
+    return (max(0, box[0] - pad_x), max(0, box[1] - pad_y),
+            min(img.width, box[2] + pad_x), min(img.height, box[3] + pad_y))
+
+
 def grid_sections(size: tuple[int, int], rows: int, cols: int,
                   overlap_pct: float) -> list[tuple[int, int, int, int]]:
     """Split (width, height) into rows x cols overlapping boxes [x, y, w, h], row-major order."""

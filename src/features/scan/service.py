@@ -22,6 +22,10 @@ SECTION_ZOOM = 3.0  # tiles are scanned at 3x — deep-detail mode (Nick: slower
 RESCUE_ZOOM = 4.0   # rescue pass looks even closer before giving up to the Boost Queue
 SPARSE_PSM = 11     # Tesseract sparse-text mode — scattered labels on drawings
 RESCUE_MIN_WORD_CONF = 45.0  # rescue-variant words below this are noise (esp. inverted runs)
+BLANK_MAX_INK = 0.004        # tile ink below this with no words = empty paper, skip rescue
+LINE_ONLY_MAX_INK = 0.02     # no words even after rescue + ink below this = just frame/border
+                             # lines — do NOT queue for AI or keep a crop (v0.1.4, Nick:
+                             # "it keeps photographing the document edges, what for?")
 
 # Auto language detect (v0.1.3): tha+eng on a Latin-only drawing hallucinates
 # stray Thai glyphs ("ง เ ผ ..."). Real Thai text shows as multi-char words —
@@ -183,9 +187,14 @@ def _scan(source_path: str, job_dir: Path, job_id: int, settings: Settings,
     # the block-layout pass misses; stitch-dedupe removes the doubles.
     full_words += engine.ocr_words(pre, langs, psm=SPARSE_PSM)
 
+    # Grid only the area that actually has ink — not the empty paper margin.
+    cx0, cy0, cx1, cy1 = imaging.content_bbox(pre)
+    content_size = (cx1 - cx0, cy1 - cy0)
     rows, cols = ((settings.grid_rows, settings.grid_cols) if not settings.auto_grid
-                  else imaging.auto_grid(pre.size, settings.grid_rows, settings.grid_cols))
-    boxes = imaging.grid_sections(pre.size, rows, cols, settings.overlap_pct)
+                  else imaging.auto_grid(content_size, settings.grid_rows, settings.grid_cols))
+    boxes = [(x + cx0, y + cy0, w, h)
+             for x, y, w, h in imaging.grid_sections(content_size, rows, cols,
+                                                     settings.overlap_pct)]
     sections: list[SectionResult] = []
     all_words: list[Word] = list(full_words)
     for idx, box in enumerate(boxes):
@@ -202,7 +211,8 @@ def _scan(source_path: str, job_dir: Path, job_id: int, settings: Settings,
         crop_path = None
         rescued = False
         rescue_method = None
-        blank = not words and imaging.ink_ratio(tile) < 0.002  # truly empty area, nothing to boost
+        ink = imaging.ink_ratio(tile)
+        blank = not words and ink < BLANK_MAX_INK  # truly empty area, nothing to boost
         # Rescue runs below the quality bar (rescue_trigger_conf), not just the queue bar —
         # mid-confidence sections get the deep treatment too.
         trigger = max(settings.rescue_trigger_conf, settings.low_conf_threshold)
@@ -214,7 +224,11 @@ def _scan(source_path: str, job_dir: Path, job_id: int, settings: Settings,
                 rescued = mean_conf >= settings.low_conf_threshold
             if not rescued:
                 rescue_method = None
-        unclear = not blank and (not words or mean_conf < settings.low_conf_threshold)
+        # Frame/border tiles: nothing readable even after every rescue variant and
+        # almost no ink — that is a line, not text. No AI queue, no crop on disk.
+        line_only = not words and ink < LINE_ONLY_MAX_INK
+        unclear = (not blank and not line_only
+                   and (not words or mean_conf < settings.low_conf_threshold))
         if unclear:
             # Still unclear: keep the crop on disk for the AI Boost pass (CONTEXT invariant)
             status = "unreadable" if not words else "low_conf"

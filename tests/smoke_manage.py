@@ -90,6 +90,30 @@ def main() -> None:
     checks["archived hidden from list"] = id2 not in {j["id"] for j in store.list_jobs(500)}
     checks["archived hidden from search"] = id2 not in {j["id"] for j in jobs_service.search(MARKER)}
 
+    # --- permanent delete (v0.1.4) ---
+    del_id = seed_job(3)
+    del_dir = Path(store.get_job(del_id)["job_dir"])
+    jobs_service.delete_job(del_id)
+    checks["delete removes DB row"] = store.get_job(del_id) is None
+    checks["delete removes folder"] = not del_dir.exists()
+
+    # --- empty trash (v0.1.4) — purges the job archived above ---
+    purged = jobs_service.empty_trash()
+    checks["empty trash purges archived"] = purged >= 1 and store.get_job(id2) is None
+    checks["trash folder gone"] = not jobs_service.TRASH_DIR.exists()
+
+    # --- content bbox (v0.1.4) ---
+    from PIL import ImageDraw
+    from src.core.utils import imaging
+    page = Image.new("L", (1000, 800), 255)
+    ImageDraw.Draw(page).rectangle((300, 200, 700, 600), outline=0, width=3)
+    bx0, by0, bx1, by1 = imaging.content_bbox(page)
+    checks["content bbox finds ink"] = (bx0 <= 300 and by0 <= 200
+                                        and bx1 >= 700 and by1 >= 600
+                                        and bx0 >= 280 and by1 <= 620)
+    blank_page = Image.new("L", (400, 300), 255)
+    checks["content bbox blank page = full"] = imaging.content_bbox(blank_page) == (0, 0, 400, 300)
+
     # --- ScanControl ---
     control = ScanControl()
     control.pause()

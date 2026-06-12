@@ -98,6 +98,43 @@ def archive_job(job_id: int) -> str:
     return str(target)
 
 
+def delete_job(job_id: int) -> None:
+    """Permanently delete one job: folder gone, all DB rows gone (user-confirmed)."""
+    job = store.get_job(job_id)
+    if job is None:
+        return
+    shutil.rmtree(job["job_dir"], ignore_errors=True)
+    store.delete_job(job_id)
+
+
+def delete_source(source: str) -> int:
+    """Permanently delete every page-job of one Source file; returns the count."""
+    rows = [j for j in store.list_jobs(limit=500)
+            if j["source_path"].split("#page=")[0] == source]
+    for j in rows:
+        delete_job(j["id"])
+    return len(rows)
+
+
+def source_job_count(source: str) -> int:
+    """How many active jobs belong to one Source file."""
+    return sum(1 for j in store.list_jobs(limit=500)
+               if j["source_path"].split("#page=")[0] == source)
+
+
+def empty_trash() -> int:
+    """Permanently delete everything that was archived (folders in jobs/_trash
+    + their hidden DB rows); returns how many jobs were purged."""
+    purged = 0
+    for job in store.archived_jobs():
+        shutil.rmtree(job["job_dir"], ignore_errors=True)
+        store.delete_job(job["id"])
+        purged += 1
+    if TRASH_DIR.exists():
+        shutil.rmtree(TRASH_DIR, ignore_errors=True)  # stray leftovers too
+    return purged
+
+
 def original_image_path(job: dict) -> Path | None:
     """The saved original image inside the job folder (original.*)."""
     job_dir = Path(job["job_dir"])

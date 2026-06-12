@@ -16,7 +16,7 @@ from src.features.updater.service import AutoUpdater
 from src.features.watcher.service import InboxWatcher
 
 APP_NAME = "OCR Agentic AI"
-APP_VERSION = "v0.1.3"  # carry rule: 0.0.9 + 1 rolls the middle place
+APP_VERSION = "v0.1.4"  # carry rule: 0.0.9 + 1 rolls the middle place
 
 
 class App(ctk.CTk):
