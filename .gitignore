@@ -1,0 +1,23 @@
+# --- secrets: never in git ---
+.env
+
+# --- runtime data / Shared Store (Open-Claw contract data stays local) ---
+data/
+dist/
+
+# --- Nick's private records & hand-off folders (local memory system) ---
+memory/
+chat_log/
+log/
+bug/
+_trash/
+ผู้ใช้/
+CLAUDE.md
+
+# --- build artifacts ---
+build/_work/
+build/stage/
+build/_version_info.txt
+.venv/
+__pycache__/
+*.pyc

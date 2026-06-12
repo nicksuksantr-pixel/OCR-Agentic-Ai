@@ -1,0 +1,7 @@
+customtkinter==5.2.2
+pillow==12.2.0
+pytesseract==0.3.13
+google-genai==2.8.0
+pypdfium2==5.9.0
+pystray==0.19.5
+pyinstaller==6.20.0
