@@ -23,20 +23,29 @@ RESCUE_MIN_WORD_CONF = 45.0  # rescue-variant words below this are noise (esp. i
 
 
 def run_source(source_path: str, settings: Settings,
-               on_progress=lambda msg: None) -> list[JobResult]:
+               on_progress=lambda msg: None, on_page_done=None) -> list[JobResult]:
     """Process one Source of any supported kind. A PDF becomes one Job per page
-    (source recorded as path#page=N); an image stays a single Job."""
+    (source recorded as path#page=N); an image stays a single Job.
+
+    `on_page_done(result)` fires after EACH Job finishes — multi-page PDFs
+    stream results page by page instead of going silent for the whole batch."""
     if not pdfio.is_pdf(source_path):
-        return [run_job(source_path, settings, on_progress)]
+        result = run_job(source_path, settings, on_progress)
+        if on_page_done:
+            on_page_done(result)
+        return [result]
     total = pdfio.page_count(source_path)
     results = []
     for i in range(total):
         on_progress(f"PDF page {i + 1}/{total}...")
         page_img = pdfio.render_page(source_path, i)
-        results.append(run_job(
+        result = run_job(
             f"{source_path}#page={i + 1}", settings,
             on_progress=lambda m, p=i + 1: on_progress(f"Page {p}/{total}: {m}"),
-            image=page_img, page=i + 1, pages=total))
+            image=page_img, page=i + 1, pages=total)
+        if on_page_done:
+            on_page_done(result)
+        results.append(result)
     return results
 
 

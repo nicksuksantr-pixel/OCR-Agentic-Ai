@@ -52,6 +52,7 @@ class ScanView(ctk.CTkFrame):
         self.controller.scan_file(
             path,
             on_progress=lambda msg: self.after(0, self._set_status, msg),
+            on_page_done=lambda r: self.after(0, self._show_page, r),
             on_done=lambda results: self.after(0, self._show_results, results),
             on_error=lambda msg: self.after(0, self._show_error, msg),
         )
@@ -59,24 +60,25 @@ class ScanView(ctk.CTkFrame):
     def _set_status(self, msg: str) -> None:
         self.status.configure(text=msg)
 
+    def _show_page(self, r) -> None:
+        """Stream one finished Job (PDF page) into the result box immediately —
+        no waiting for the rest of the batch."""
+        queued = sum(1 for s in r.sections if s.status in ("low_conf", "unreadable"))
+        header = f"--- Page {r.page}/{r.pages} (job {r.job_id}) ---\n" if r.page else ""
+        self.result_box.insert("end", header + (r.full_text or "(no text found)") + "\n\n")
+        label = f"Page {r.page}/{r.pages}" if r.page else f"Job {r.job_id}"
+        self._set_status(
+            f"✅ {label} done — confidence {r.mean_conf}%"
+            + (f" · {queued} section(s) queued for AI Boost" if queued else ""))
+        if self.on_job_done:
+            self.on_job_done(r)
+
     def _show_results(self, results) -> None:
-        """Render the finished Raw Extract(s) — one block per Job (PDF page)."""
-        queued = sum(1 for r in results for s in r.sections
-                     if s.status in ("low_conf", "unreadable"))
+        """Whole Source finished — final summary (pages already streamed in)."""
         jobs = ", ".join(str(r.job_id) for r in results)
         conf = round(sum(r.mean_conf for r in results) / len(results), 1)
-        self._set_status(
-            f"✅ Job(s) {jobs} done — confidence {conf}%"
-            + (f" · {queued} section(s) queued for AI Boost" if queued else ""))
-        blocks = []
-        for r in results:
-            header = f"--- Page {r.page}/{r.pages} (job {r.job_id}) ---\n" if r.page else ""
-            blocks.append(header + (r.full_text or "(no text found)"))
-        self.result_box.insert("1.0", "\n\n".join(blocks))
+        self._set_status(f"✅ All done — job(s) {jobs}, overall confidence {conf}%")
         self.pick_btn.configure(state="normal")
-        if self.on_job_done:
-            for r in results:
-                self.on_job_done(r)
 
     def _show_error(self, msg: str) -> None:
         self._set_status(f"❌ {msg}")

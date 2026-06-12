@@ -77,9 +77,12 @@ class InboxWatcher:
         """Scan one dropped file, then move it out of the inbox (never delete)."""
         self.on_event(f"Inbox: scanning {f.name}...")
         try:
+            # on_page_done streams each finished page so multi-page PDFs show up
+            # (and auto-boost) page by page instead of after the whole file.
             results = scan_service.run_source(
                 str(f), self.settings,
-                on_progress=lambda m: self.on_event(f"Inbox {f.name}: {m}"))
+                on_progress=lambda m: self.on_event(f"Inbox {f.name}: {m}"),
+                on_page_done=self.on_job_done)
         except Exception as exc:
             self._move(f, paths.INBOX_FAILED)
             self.on_event(f"Inbox: ❌ {f.name} failed — {exc}")
@@ -88,8 +91,6 @@ class InboxWatcher:
         jobs = ", ".join(str(r.job_id) for r in results)
         self.on_event(f"Inbox: ✅ {f.name} → job(s) {jobs} "
                       f"(confidence {results[-1].mean_conf}%)")
-        for result in results:
-            self.on_job_done(result)
 
     def _move(self, f: Path, target_dir: Path) -> None:
         """Move into processed/failed, adding a numeric suffix on name clashes."""

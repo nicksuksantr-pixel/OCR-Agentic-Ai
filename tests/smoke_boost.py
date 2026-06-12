@@ -48,9 +48,20 @@ def main() -> None:
     job_id, seeded = seed_job()
     settings = settings_mod.load()
     settings.ai_boost_enabled = True
+    settings.paid_tier = False  # exercise the free-tier path (model lock + cap)
 
+    # Isolation: drain ONLY the seeded item — never touch real pending queue rows
+    # (v0.1.1 lesson: this test used to fake-answer the whole dev queue).
+    real_pending = store.pending_boost_items
+    store.pending_boost_items = (
+        lambda limit=100: [i for i in real_pending(limit) if i["job_id"] == job_id])
+    boost_service.store.pending_boost_items = store.pending_boost_items
+
+    models_used: list[str] = []
     if not live:
-        gemini.boost_section = lambda crop, local, model: FAKE_ANSWER  # offline fake
+        settings.gemini_model = "gemini-2.5-pro"  # must be ignored while locked to free
+        gemini.boost_section = (
+            lambda crop, local, model: (models_used.append(model), FAKE_ANSWER)[1])
         if not gemini.read_api_key():
             gemini.read_api_key = lambda: "fake-key-for-offline-test"
 
@@ -70,6 +81,8 @@ def main() -> None:
     }
     if not live:
         checks["ai_text matches fake"] = FAKE_ANSWER in (job["full_text"] or "")
+        checks["free tier locked to free model"] = (
+            models_used == [boost_service.FREE_MODEL])
     else:
         print("live AI answer:", result_json.get("ai_boosts", [{}])[-1].get("ai_text"))
 

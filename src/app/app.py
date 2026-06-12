@@ -15,7 +15,7 @@ from src.features.updater.service import AutoUpdater
 from src.features.watcher.service import InboxWatcher
 
 APP_NAME = "OCR Agentic AI"
-APP_VERSION = "v0.1.0"  # carry rule: 0.0.9 + 1 rolls the middle place
+APP_VERSION = "v0.1.1"  # carry rule: 0.0.9 + 1 rolls the middle place
 
 
 class App(ctk.CTk):
@@ -101,8 +101,10 @@ class App(ctk.CTk):
         self.destroy()
 
     def _after_scan(self, _result) -> None:
-        """Auto-drain the Boost Queue after each scan when AI Boost is enabled."""
+        """Per finished Job (each PDF page streams here): refresh the Jobs list
+        and auto-drain the Boost Queue when AI Boost is enabled."""
         self.settings_view.refresh_queue()
+        self.jobs_view.refresh()
         self.boost.auto_send(
             on_progress=lambda msg: self.after(0, self.scan_view._set_status, msg),
             on_done=lambda s: self.after(0, self._boost_done, s),

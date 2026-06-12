@@ -62,7 +62,7 @@
     • `class ScanController` — Bridges the Scan view and the pipeline; keeps the UI thread free.
         ↳ engine_ready, scan_file
 - `src/features/scan/service.py`
-    • `run_source(source_path, settings, on_progress)` — Process one Source of any supported kind. A PDF becomes one Job per page
+    • `run_source(source_path, settings, on_progress, on_page_done)` — Process one Source of any supported kind. A PDF becomes one Job per page
     • `run_job(source_path, settings, on_progress)` — Process one Source end-to-end and persist everything to the Shared Store.
 - `src/features/scan/view.py`
     • `class ScanView` — The Scan tab: select-file button + progress label + result textbox.

@@ -5,6 +5,10 @@ failure requeues the item and stops the run — nothing local is ever blocked.
 Throttle: ≥4.2 s between requests (≈14 RPM < 15) and a daily request budget
 tracked in data/boost_usage.json keyed by the Pacific date (free tier resets
 at midnight Pacific ≈ 14:00-15:00 Thai).
+Paid tier (settings.paid_tier, unlocked in Settings after an explicit consent
+dialog): RPM throttle drops to a gentle 0.5 s, the daily cap is skipped, and
+any model may be used. Free tier is hard-locked to FREE_MODEL regardless of
+what settings.gemini_model says.
 """
 import json
 import time
@@ -18,6 +22,8 @@ from src.core.services import gemini, store
 
 USAGE_PATH = paths.DATA_DIR / "boost_usage.json"
 SECONDS_BETWEEN_REQUESTS = 4.2
+PAID_SECONDS_BETWEEN_REQUESTS = 0.5  # paid tier: gentle pacing only — never hammer the API
+FREE_MODEL = "gemini-3.1-flash-lite"  # the only model allowed until paid tier is unlocked
 # Pacific approximated as UTC-7 (PDT). Off by 1h half the year — fine for a soft cap.
 _PACIFIC_OFFSET = timedelta(hours=-7)
 
@@ -45,13 +51,17 @@ def send_pending(settings: Settings, on_progress=lambda msg: None) -> BoostRunSu
         summary.stopped_reason = "Boost Queue is empty."
         return summary
 
+    # Free tier is locked to FREE_MODEL — paid models only after the unlock consent.
+    model = settings.gemini_model if settings.paid_tier else FREE_MODEL
+
     for n, item in enumerate(items):
-        if _used_today() >= settings.boost_daily_cap:
+        if not settings.paid_tier and _used_today() >= settings.boost_daily_cap:
             summary.stopped_reason = (f"Daily cap reached ({settings.boost_daily_cap} requests) — "
                                       "resumes after the free-tier reset (≈14:00-15:00 Thai).")
             break
         if n > 0:
-            time.sleep(SECONDS_BETWEEN_REQUESTS)  # stay under 15 RPM
+            time.sleep(PAID_SECONDS_BETWEEN_REQUESTS if settings.paid_tier
+                       else SECONDS_BETWEEN_REQUESTS)  # free: stay under 15 RPM
 
         on_progress(f"Boosting section {item['section_idx']} of job {item['job_id']} "
                     f"({n + 1}/{len(items)})...")
@@ -65,8 +75,7 @@ def send_pending(settings: Settings, on_progress=lambda msg: None) -> BoostRunSu
         summary.sent += 1
         _count_request()  # counts the attempt — quota is spent even when the call fails
         try:
-            ai_text = gemini.boost_section(item["crop_path"], item["local_text"],
-                                           settings.gemini_model)
+            ai_text = gemini.boost_section(item["crop_path"], item["local_text"], model)
         except Exception as exc:
             # Network/quota/API problem: requeue and stop — try again next time online.
             store.fail_boost(item["id"], requeue=True)

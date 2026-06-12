@@ -1,10 +1,37 @@
 """Settings tab UI — Gemini key (.env), AI Boost toggle, model, daily cap, boost-now. UI only."""
+from tkinter import messagebox
+
 import customtkinter as ctk
 
 from src.core.config.settings import Settings
 from src.core.services import gemini
 from src.features.boost.controller import BoostController
+from src.features.boost.service import FREE_MODEL
 from src.features.jobs import service as jobs_service
+
+# The main Gemini models (display name → API model id). Free tier is locked to
+# FREE_MODEL; the rest need the paid-tier unlock below.
+MODELS = {
+    "Gemini 3.1 Flash Lite (free tier)": "gemini-3.1-flash-lite",
+    "Gemini 3.1 Pro": "gemini-3.1-pro",
+    "Gemini 3.5 Flash": "gemini-3.5-flash",
+    "Gemini 2.5 Pro": "gemini-2.5-pro",
+    "Gemini 2.5 Flash": "gemini-2.5-flash",
+    "Gemini 2.5 Flash Lite": "gemini-2.5-flash-lite",
+    "Gemini 2 Flash": "gemini-2.0-flash",
+    "Gemini 2 Flash Lite": "gemini-2.0-flash-lite",
+}
+
+PAID_CONSENT = (
+    "Unlock paid tier?\n\n"
+    "This removes the free-tier safety limits:\n"
+    "  • rate throttle 14 requests/min → 0.5 s pacing\n"
+    "  • daily request cap → ignored\n"
+    "  • all Gemini models selectable\n\n"
+    "Your API key will be billed by Google for every request.\n"
+    "A FREE key used here will just hit quota errors (429).\n\n"
+    "I understand and accept the costs."
+)
 
 
 class SettingsView(ctk.CTkFrame):
@@ -34,22 +61,28 @@ class SettingsView(ctk.CTkFrame):
         if gemini.read_api_key():
             self.key_entry.insert(0, gemini.read_api_key())
 
-        ctk.CTkLabel(box, text="Model").grid(row=3, column=0, sticky="w", padx=12, pady=4)
-        self.model_entry = ctk.CTkEntry(box, width=360)
-        self.model_entry.grid(row=3, column=1, sticky="we", padx=12, pady=4)
-        self.model_entry.insert(0, settings.gemini_model)
+        self.paid_var = ctk.BooleanVar(value=settings.paid_tier)
+        ctk.CTkSwitch(box, text="🔓 Unlock paid tier (no throttle, no daily cap, all models — billed key)",
+                      variable=self.paid_var, command=self._toggle_paid).grid(
+            row=3, column=0, columnspan=2, sticky="w", padx=12, pady=4)
 
-        ctk.CTkLabel(box, text="Daily request cap (free tier RPD 500)").grid(
-            row=4, column=0, sticky="w", padx=12, pady=4)
+        ctk.CTkLabel(box, text="Model").grid(row=4, column=0, sticky="w", padx=12, pady=4)
+        self.model_menu = ctk.CTkOptionMenu(box, width=360, values=list(MODELS))
+        self.model_menu.grid(row=4, column=1, sticky="w", padx=12, pady=4)
+        self.model_menu.set(self._display_for(settings.gemini_model))
+
+        ctk.CTkLabel(box, text="Daily request cap (free tier RPD 500; ignored when unlocked)").grid(
+            row=5, column=0, sticky="w", padx=12, pady=4)
         self.cap_entry = ctk.CTkEntry(box, width=120)
-        self.cap_entry.grid(row=4, column=1, sticky="w", padx=12, pady=4)
+        self.cap_entry.grid(row=5, column=1, sticky="w", padx=12, pady=4)
         self.cap_entry.insert(0, str(settings.boost_daily_cap))
 
         ctk.CTkButton(box, text="💾 Save settings", command=self._save).grid(
-            row=5, column=0, sticky="w", padx=12, pady=(8, 12))
+            row=6, column=0, sticky="w", padx=12, pady=(8, 12))
         self.save_status = ctk.CTkLabel(box, text="", anchor="w")
-        self.save_status.grid(row=5, column=1, sticky="w", padx=12, pady=(8, 12))
+        self.save_status.grid(row=6, column=1, sticky="w", padx=12, pady=(8, 12))
         box.columnconfigure(1, weight=1)
+        self._apply_paid_state()
 
         iface_box = ctk.CTkFrame(self)
         iface_box.pack(fill="x", padx=16, pady=8)
@@ -108,13 +141,38 @@ class SettingsView(ctk.CTkFrame):
         self.queue_label.configure(
             text=f"{jobs_service.boost_pending()} section(s) waiting for AI Boost")
 
+    @staticmethod
+    def _display_for(model_id: str) -> str:
+        """Map a stored model id back to its dropdown label (free model on miss)."""
+        for display, mid in MODELS.items():
+            if mid == model_id:
+                return display
+        return next(d for d, m in MODELS.items() if m == FREE_MODEL)
+
+    def _toggle_paid(self) -> None:
+        """Unlocking requires explicit consent; declining flips the switch back."""
+        if self.paid_var.get() and not messagebox.askyesno(
+                "Paid tier", PAID_CONSENT, icon="warning", parent=self):
+            self.paid_var.set(False)
+        self._apply_paid_state()
+
+    def _apply_paid_state(self) -> None:
+        """Free tier = model locked to the free one; unlocked = full dropdown."""
+        if self.paid_var.get():
+            self.model_menu.configure(state="normal")
+        else:
+            self.model_menu.set(self._display_for(FREE_MODEL))
+            self.model_menu.configure(state="disabled")
+
     def _save(self) -> None:
         """Persist settings.json + .env from the form."""
         key = self.key_entry.get().strip()
         if key:
             gemini.save_api_key(key)
         self.settings.ai_boost_enabled = self.enabled_var.get()
-        self.settings.gemini_model = self.model_entry.get().strip() or self.settings.gemini_model
+        self.settings.paid_tier = self.paid_var.get()
+        self.settings.gemini_model = (MODELS.get(self.model_menu.get(), FREE_MODEL)
+                                      if self.settings.paid_tier else FREE_MODEL)
         try:
             self.settings.boost_daily_cap = max(1, int(self.cap_entry.get()))
         except ValueError:

@@ -21,6 +21,7 @@ class Settings:
     ai_boost_enabled: bool = False    # Gemini booster — off by default, key lives in .env
     gemini_model: str = "gemini-3.1-flash-lite"  # AI Studio free tier; user may pick a paid model
     boost_daily_cap: int = 300        # soft daily request budget (free tier RPD 500, key may be shared)
+    paid_tier: bool = False           # unlocked = no RPM throttle, no daily cap, all models (user accepted billing conditions in Settings)
     watch_inbox: bool = True          # auto-scan files dropped into data\inbox
     api_enabled: bool = True          # localhost REST API for Open-Claw (the Heart)
     api_port: int = 8765              # API listens on 127.0.0.1:<port> — local machine only
