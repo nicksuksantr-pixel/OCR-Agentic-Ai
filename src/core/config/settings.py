@@ -28,7 +28,7 @@ class Settings:
     auto_grid: bool = True            # scale the section grid with image size (configured grid = minimum, cap 7x7)
     rescue_enabled: bool = True       # unclear sections retry locally (4x zoom/binarize/sparse/rotate) before the Boost Queue
     auto_update: bool = True          # check GitHub Releases daily; silent install on app exit
-    update_repo: str = ""             # "owner/repo" on GitHub — empty disables the updater
+    update_repo: str = "nicksuksantr-pixel/OCR-Agentic-Ai"  # GitHub update channel; empty disables
 
     def save(self) -> None:
         """Write settings to disk as JSON."""
