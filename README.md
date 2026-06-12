@@ -5,7 +5,7 @@
 ## Stack & version
 
 - Python 3.13 + CustomTkinter 5.2.2 · Tesseract OCR (local, offline, tha+eng) · SQLite
-- Current version: **v0.0.9** (3-place versioning per Nick, 2026-06-12)
+- Current version: **v0.1.0** (3-place versioning per Nick, 2026-06-12) · releases: [github.com/nicksuksantr-pixel/OCR-Agentic-Ai](https://github.com/nicksuksantr-pixel/OCR-Agentic-Ai/releases)
 - Gemini AI Boost: AI Studio key in `.env` (`GEMINI_API_KEY=...`), default model `gemini-3.1-flash-lite`, free-tier throttled (15 RPM / 500 RPD)
 
 ## Run / build
@@ -42,7 +42,7 @@
 - **Tray mode** — closing the window hides the app to the system tray; watcher + API keep serving Open-Claw. Tray menu: Open / Quit. Single-instance (mutex).
 - **Silent auto-update** — daily GitHub-Releases check (Settings → Updates: repo + toggle); a newer Setup is downloaded, SHA-256-verified, and installs silently when the app exits, then relaunches. One UAC popup per update (Program Files — Windows requirement).
 - **Data location** — dev runs use `<project>\data\`; installed (.exe) builds will use `%LOCALAPPDATA%\OCR-Agentic-Ai\` like a normal Windows program (`OCR_AGENTIC_DATA_DIR` overrides).
-- Open item: GitHub repo for the update channel (Nick creates → set `owner/repo` in Settings → Updates).
+- **Branding** — icon (scanning eye) = identity: taskbar/installer/shortcuts. Mascot "Scout" (one-eyed scanner robot, `assets\mascot.png`) = helper: Scan tab + installer wizard pages. Never swap roles (#3). Regenerate: `build\make_icon.py` / `build\make_mascot.py`.
 
 ## 🧭 Doc map
 
