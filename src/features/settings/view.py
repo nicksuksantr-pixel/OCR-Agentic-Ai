@@ -28,6 +28,15 @@ MODELS = {
     "Gemini 2 Flash Lite": "gemini-2.0-flash-lite",
 }
 
+# OCR language combos → the Tesseract lang join-string stored in Settings.languages.
+# A fixed 3-item list (not a free-form multiselect) covers the documented language
+# policy and keeps the change small; the picker only ever writes one of these.
+LANGS = {
+    "Thai + English": "tha+eng",
+    "English only": "eng",
+    "Thai only": "tha",
+}
+
 PAID_CONSENT = (
     "Unlock paid tier?\n\n"
     "This removes the free-tier safety limits:\n"
@@ -97,7 +106,8 @@ class SettingsView(ctk.CTkFrame):
                       variable=self.paid_var, command=self._toggle_paid).grid(
             row=2, column=0, columnspan=2, sticky="w", pady=theme.XS)
         ctk.CTkLabel(grid, text="Model").grid(row=3, column=0, sticky="w", pady=theme.XS)
-        self.model_menu = ctk.CTkOptionMenu(grid, values=list(MODELS))
+        self.model_menu = ctk.CTkOptionMenu(grid, values=list(MODELS),
+                                            command=self._on_model_change)
         self.model_menu.grid(row=3, column=1, sticky="w", padx=(theme.S, 0), pady=theme.XS)
         self.model_menu.set(self._display_for(self.settings.gemini_model))
         ctk.CTkLabel(grid, text="Daily request cap (free tier; ignored when unlocked)").grid(
@@ -127,6 +137,12 @@ class SettingsView(ctk.CTkFrame):
                       **theme.ghost_btn()).grid(row=1, column=1, padx=(theme.S, theme.XS), pady=theme.XS)
         ctk.CTkButton(row, text="🔁 Re-check", width=100, command=self._recheck_engine,
                       **theme.ghost_btn()).grid(row=1, column=2, pady=theme.XS)
+        lang_row = ctk.CTkFrame(box, fg_color="transparent")
+        lang_row.pack(fill="x", padx=theme.M, pady=(theme.XS, 0))
+        ctk.CTkLabel(lang_row, text="OCR languages").pack(side="left")
+        self.lang_menu = ctk.CTkOptionMenu(lang_row, values=list(LANGS))
+        self.lang_menu.pack(side="left", padx=theme.S)
+        self.lang_menu.set(self._display_for_lang(self.settings.languages))
         self.engine_status = ctk.CTkLabel(box, text="", anchor="w", font=theme.font_caption())
         self.engine_status.pack(fill="x", padx=theme.M)
         self.auto_lang_var = ctk.BooleanVar(value=self.settings.auto_language)
@@ -237,6 +253,15 @@ class SettingsView(ctk.CTkFrame):
                 return display
         return next(d for d, m in MODELS.items() if m == FREE_MODEL)
 
+    @staticmethod
+    def _display_for_lang(lang_string: str) -> str:
+        """Menu label for a stored Settings.languages join-string (falls back to
+        the tha+eng default for any unrecognised value)."""
+        for display, value in LANGS.items():
+            if value == lang_string:
+                return display
+        return next(d for d, v in LANGS.items() if v == "tha+eng")
+
     def _browse_tesseract(self) -> None:
         path = filedialog.askopenfilename(
             title="Locate tesseract.exe",
@@ -251,7 +276,22 @@ class SettingsView(ctk.CTkFrame):
         if err:
             self.engine_status.configure(text=f"❌ {err}", text_color=theme.DANGER_HI)
         else:
-            self.engine_status.configure(text="✅ Tesseract found and ready.", text_color=theme.SUCCESS)
+            # Engine is found — now check the SELECTED languages are actually
+            # installed. Without this, a dev/portable run missing tha.traineddata
+            # passes this check and then throws on the first OCR call. Warn here
+            # instead (installed .exe bundles tha, so end users never see this).
+            selected = LANGS.get(self.lang_menu.get(), self.settings.languages)
+            installed = set(engine.available_languages())
+            missing = [lang for lang in selected.split("+") if lang not in installed]
+            if missing:
+                names = ", ".join(f"'{m}'" for m in missing)
+                self.engine_status.configure(
+                    text=(f"⚠ Language {names} is selected but not installed — scans will "
+                          "fail until it is added or you switch to an installed language."),
+                    text_color=theme.WARN)
+            else:
+                self.engine_status.configure(text="✅ Tesseract found and ready.",
+                                             text_color=theme.SUCCESS)
         if self.on_saved:
             self.on_saved()  # re-enable the Scan button if the engine is now ready
 
@@ -268,6 +308,21 @@ class SettingsView(ctk.CTkFrame):
                 self, "Paid tier", PAID_CONSENT, kind="warn"):
             self.paid_var.set(False)
         self._apply_paid_state()
+        self._persist_tier()
+
+    def _on_model_change(self, _choice=None) -> None:
+        """Persist the model pick the moment it changes (CTkOptionMenu passes the
+        chosen value). Free tier stays hard-locked to FREE_MODEL."""
+        self._persist_tier()
+
+    def _persist_tier(self) -> None:
+        """Save paid_tier + gemini_model on change so they survive leaving the
+        tab without Save — these are plain settings.json values (no service
+        restart), mirroring what _save() writes for the same two fields."""
+        self.settings.paid_tier = self.paid_var.get()
+        self.settings.gemini_model = (MODELS.get(self.model_menu.get(), FREE_MODEL)
+                                      if self.settings.paid_tier else FREE_MODEL)
+        self.settings.save()
 
     def _apply_paid_state(self) -> None:
         if self.paid_var.get():
@@ -294,6 +349,15 @@ class SettingsView(ctk.CTkFrame):
                                        text_color=theme.DANGER_HI)
             return
 
+        # Capture the three interface fields BEFORE reassigning them — they are
+        # read once at App init and only take effect on restart (the watcher /
+        # API are not rebound live), so the Save toast must say so honestly
+        # instead of a bare '✅ Saved.' that implies an immediate effect.
+        interfaces_changed = (
+            self.settings.watch_inbox != self.watch_var.get()
+            or self.settings.api_enabled != self.api_var.get()
+            or self.settings.api_port != port)
+
         key = self.key_entry.get().strip()
         if key:
             gemini.save_api_key(key)
@@ -303,6 +367,7 @@ class SettingsView(ctk.CTkFrame):
                                       if self.settings.paid_tier else FREE_MODEL)
         self.settings.boost_daily_cap = cap
         self.settings.tesseract_path = self.tess_entry.get().strip() or self.settings.tesseract_path
+        self.settings.languages = LANGS.get(self.lang_menu.get(), self.settings.languages)
         self.settings.auto_language = self.auto_lang_var.get()
         self.settings.watch_inbox = self.watch_var.get()
         self.settings.api_enabled = self.api_var.get()
@@ -311,7 +376,12 @@ class SettingsView(ctk.CTkFrame):
         self.settings.auto_update = self.auto_update_var.get()
         self.settings.update_repo = self.repo_entry.get().strip()
         self.settings.save()
-        self.save_status.configure(text="✅ Saved.", text_color=theme.SUCCESS)
+        if interfaces_changed:
+            self.save_status.configure(
+                text="✅ Saved. (Watch-inbox / Local API changes apply after restart.)",
+                text_color=theme.SUCCESS)
+        else:
+            self.save_status.configure(text="✅ Saved.", text_color=theme.SUCCESS)
         if self.on_saved:
             self.on_saved()
 

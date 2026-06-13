@@ -16,7 +16,7 @@ from PIL import Image, ImageOps
 from src.core.config import paths
 from src.core.config.settings import Settings
 from src.core.models.ocr import Word, SectionResult, JobResult
-from src.core.services import engine, store
+from src.core.services import engine, gemini, store
 from src.core.utils import imaging, pdfio
 
 SECTION_ZOOM = 3.0  # tiles are scanned at 3x — deep-detail mode (Nick: slower is fine)
@@ -498,10 +498,16 @@ def _rescue(pre, box, langs: str, base_words: list[Word],
 
 def _persist(result: JobResult, settings: Settings) -> None:
     """Write result.json + DB rows; queue unclear sections for AI Boost."""
+    # Only enqueue boost work that can actually drain. With no Gemini key the
+    # sender stops immediately, so queueing here would just pile up undrainable
+    # rows (and the Scan tab already warns there is no key). The local Raw
+    # Extract is still written in full below — nothing local is dropped, and the
+    # section crop stays on disk so a later key + re-scan can still boost it.
+    boost_ready = gemini.read_api_key() is not None
     for sec in result.sections:
         section_id = store.add_section(result.job_id, sec.idx, list(sec.bbox),
                                        sec.crop_path, sec.mean_conf, sec.status)
-        if sec.status in ("low_conf", "unreadable"):
+        if boost_ready and sec.status in ("low_conf", "unreadable"):
             local_text = " ".join(w.text for w in sec.words)
             store.queue_boost(result.job_id, section_id, sec.crop_path, local_text)
     store.add_words(result.job_id, result.words)
