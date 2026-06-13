@@ -23,19 +23,41 @@ import threading
 import urllib.request
 from pathlib import Path
 
+from src.core.config import paths
 from src.core.config.settings import Settings
 
 ASSET_PREFIX = "OCR-Agentic-Ai_Setup_"   # release asset naming contract (build.ps1)
 APP_EXE_NAME = "OCR-Agentic-Ai.exe"
+APPLIED_PATH = paths.DATA_DIR / "applied_update.json"  # last tag we actually installed
 
 
-def parse_version(tag: str) -> tuple[int, ...]:
-    """'v0.0.9' → (0, 0, 9); tolerant of missing 'v' and junk suffixes."""
+def parse_version(tag: str) -> tuple[int, int, int]:
+    """'v0.0.9' → (0, 0, 9); tolerant of missing 'v' and junk suffixes. ALWAYS a
+    fixed 3-tuple so a longer tag can't compare greater on padding alone —
+    'v0.1.5.0' vs 'v0.1.5' used to read as newer and re-install the SAME build
+    on every quit, looping a UAC prompt (v0.2.0 fix)."""
     nums = []
     for part in tag.strip().lstrip("vV").split("."):
         digits = "".join(ch for ch in part if ch.isdigit())
         nums.append(int(digits) if digits else 0)
-    return tuple(nums or [0])
+    nums = (nums + [0, 0, 0])[:3]
+    return (nums[0], nums[1], nums[2])
+
+
+def _read_applied_tag() -> str | None:
+    """The release tag we last handed to the installer (None when never)."""
+    try:
+        return json.loads(APPLIED_PATH.read_text(encoding="utf-8")).get("tag") or None
+    except (OSError, json.JSONDecodeError, AttributeError):
+        return None
+
+
+def _write_applied_tag(tag: str) -> None:
+    try:
+        APPLIED_PATH.parent.mkdir(parents=True, exist_ok=True)
+        APPLIED_PATH.write_text(json.dumps({"tag": tag}), encoding="utf-8")
+    except OSError:
+        pass
 
 
 def fetch_latest_release(repo: str, timeout: float = 10.0) -> dict | None:
@@ -103,6 +125,7 @@ class AutoUpdater:
         self.version = version
         self.on_event = on_event
         self.staged_setup: Path | None = None  # downloaded+verified, installs on exit
+        self.staged_tag: str | None = None     # the tag that setup carries
 
     # --- checking ------------------------------------------------------------
 
@@ -127,7 +150,15 @@ class AutoUpdater:
                 self.on_event("Update check failed — offline or repo unreachable.")
             return
         latest = release.get("tag_name", "")
-        if parse_version(latest) <= parse_version(self.version):
+        # Skip anything not strictly newer than BOTH the running build and the
+        # last tag we already installed — a release that equals what we've
+        # installed is never re-downloaded, even if the frozen exe's reported
+        # version lags behind (duplicate-install guard, v0.2.0).
+        applied = _read_applied_tag()
+        floor = parse_version(self.version)
+        if applied:
+            floor = max(floor, parse_version(applied))
+        if parse_version(latest) <= floor:
             if manual:
                 self.on_event(f"Up to date ({self.version} is the latest).")
             return
@@ -150,6 +181,7 @@ class AutoUpdater:
                     self.on_event("Update download failed checksum — discarded.")
                     return
             self.staged_setup = dest
+            self.staged_tag = latest
             self.on_event(f"Update {latest} ready — installs silently when you quit.")
         except Exception as exc:
             self.on_event(f"Update download failed: {exc}")
@@ -161,6 +193,8 @@ class AutoUpdater:
         when the script was started (caller should proceed to exit)."""
         if not (self.staged_setup and self.staged_setup.exists()):
             return False
+        if self.staged_tag:  # remember what we installed so we never re-install it
+            _write_applied_tag(self.staged_tag)
         app_exe = Path(sys.executable)
         bat = make_apply_script(self.staged_setup, app_exe)
         subprocess.Popen(

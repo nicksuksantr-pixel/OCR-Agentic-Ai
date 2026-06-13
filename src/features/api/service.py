@@ -108,7 +108,12 @@ class ApiServer:
                 return
             result_path = Path(job["job_dir"]) / "result.json"
             if not result_path.exists():
-                h._send(404, {"error": "result.json not found"})
+                # No result.json (older error job) → return the DB record so the
+                # Heart still gets a machine-readable status instead of a 404.
+                h._send(200, {"job_id": job["id"], "source_path": job["source_path"],
+                              "status": job["status"], "error": job.get("error"),
+                              "full_text": job.get("full_text") or "",
+                              "note": "result.json absent — job did not finish"})
                 return
             h._send(200, json.loads(result_path.read_text(encoding="utf-8")))
         else:

@@ -4,6 +4,7 @@ This is the heart of the eyes: one Source in, maximum-detail Raw Extract out
 (result.json + DB rows + queued crops for AI Boost).
 """
 import json
+import shutil
 import threading
 import time
 from dataclasses import asdict
@@ -23,33 +24,73 @@ ZOOM_MAX_SIDE = 8000  # sanity cap: a zoomed tile never exceeds this side in px
 RESCUE_ZOOM = 4.0   # rescue pass looks even closer before giving up to the Boost Queue
 SPARSE_PSM = 11     # Tesseract sparse-text mode — scattered labels on drawings
 RESCUE_MIN_WORD_CONF = 45.0  # rescue-variant words below this are noise (esp. inverted runs)
+_SCAN_LOCK = threading.Lock()  # one scan at a time across GUI / inbox / API (v0.2.0)
 BLANK_MAX_INK = 0.004        # tile ink below this with no words = empty paper, skip rescue
 LINE_ONLY_MAX_INK = 0.02     # no words even after rescue + ink below this = just frame/border
                              # lines — do NOT queue for AI or keep a crop (v0.1.4, Nick:
                              # "it keeps photographing the document edges, what for?")
 
-# Auto language detect (v0.1.3): tha+eng on a Latin-only drawing hallucinates
-# stray Thai glyphs ("ง เ ผ ..."). Real Thai text shows as multi-char words —
-# when a page has almost none, the whole page re-runs English-only.
-LATIN_ONLY_MIN_WORD_LEN = 3    # a "real" Thai word has at least this many chars
-LATIN_ONLY_MAX_COUNT = 3       # fewer real Thai words than this AND
-LATIN_ONLY_MAX_RATIO = 0.02    # below this share of confident words → eng only
+# Auto language detect (v0.1.3, fixed v0.2.0): tha+eng on a Latin-only drawing
+# makes the tha model hallucinate stray Thai glyphs ("ง เ ผ ฬ ฯ ไ ..."). The old
+# gate counted "real Thai words" and was defeated by the very noise it targeted
+# (3+ multi-char Thai blobs on a dense drawing flipped it off). The fix measures
+# CHARACTER MASS: a page that is overwhelmingly Latin letters is English-only,
+# no matter how many phantom Thai blobs the noise produced.
+LATIN_ONLY_MAX_THAI_SHARE = 0.10  # ≤10% Thai-char mass among confident text → eng only
+
+# Standalone single-char line artifacts (ruled lines, dimension ticks, table
+# borders) the sparse/rescue passes read as "|", "/", etc. Dropping these is not
+# "guessing a symbol" — the section crop is still queued for AI Boost when it
+# falls below threshold, so nothing meaningful is lost (v0.2.0).
+_NOISE_SINGLE = set("|¦/\\_~`^¬")
 
 
 def _has_thai(text: str) -> bool:
     return any("฀" <= ch <= "๿" for ch in text)  # Thai Unicode block
 
 
+def _thai_char_count(text: str) -> int:
+    return sum(1 for ch in text if "฀" <= ch <= "๿")
+
+
+def _latin_char_count(text: str) -> int:
+    return sum(1 for ch in text if ch.isascii() and ch.isalpha())
+
+
 def latin_only_page(words: list[Word]) -> bool:
-    """True when the first full pass shows no real Thai text — only glyph noise."""
+    """True when confident text is overwhelmingly Latin — the page is English
+    and the Thai pass only adds glyph noise. Mass-based so it fires on both
+    dense drawings (many short Thai blobs) and sparse ones; a genuinely Thai
+    page has Thai characters dominating and stays tha+eng."""
     confident = [w for w in words if w.conf >= 60]
     if not confident:
         return False  # nothing readable yet — keep both languages, sections decide
-    thai_real = [w for w in confident
-                 if _has_thai(w.text)
-                 and len("".join(w.text.split())) >= LATIN_ONLY_MIN_WORD_LEN]
-    return (len(thai_real) < LATIN_ONLY_MAX_COUNT
-            and len(thai_real) / len(confident) < LATIN_ONLY_MAX_RATIO)
+    latin = sum(_latin_char_count(w.text) for w in confident)
+    thai = sum(_thai_char_count(w.text) for w in confident)
+    if latin + thai == 0:
+        return False  # only digits/symbols — no language signal, keep both
+    return latin > 0 and thai / (latin + thai) < LATIN_ONLY_MAX_THAI_SHARE
+
+
+def _mostly_thai(text: str) -> bool:
+    """True when a token is majority Thai codepoints — a phantom glyph on a page
+    already judged English-only. The token-level safety net the pipeline lacked:
+    even if one pass slipped through with tha, no Thai escapes an English page."""
+    stripped = [c for c in text if not c.isspace()]
+    if not stripped:
+        return False
+    return sum(1 for c in stripped if "฀" <= c <= "๿") > len(stripped) / 2
+
+
+def _is_line_noise(text: str) -> bool:
+    """True for standalone ruled-line artifacts ('|', '///', '¦¦') — never a
+    meaningful OCR word on these drawings."""
+    t = "".join(text.split())
+    if not t:
+        return True
+    if len(t) == 1 and t in _NOISE_SINGLE:
+        return True
+    return set(t) <= {"|", "¦"}  # pipe runs like "|||"
 
 
 class ScanCancelled(Exception):
@@ -110,30 +151,31 @@ def run_source(source_path: str, settings: Settings,
         if on_page_done:
             on_page_done(result)
         return [result]
-    total = pdfio.page_count(source_path)
     results = []
-    for i in range(total):
-        if skip_pages and (i + 1) in skip_pages:
-            on_progress(f"Page {i + 1}/{total} already scanned — skipped.")
-            continue
-        on_progress(f"PDF page {i + 1}/{total}...")
-        try:
-            if control:
-                control.checkpoint()
-            page_img = pdfio.render_page(source_path, i)
-            # Real paper size measured BEFORE any scanning — it drives the
-            # Sectioned-Scan grid (A4 vs A0 must not split the same; Nick v0.1.5).
-            size_mm = pdfio.page_size_mm(source_path, i)
-            result = run_job(
-                f"{source_path}#page={i + 1}", settings,
-                on_progress=lambda m, p=i + 1: on_progress(f"Page {p}/{total}: {m}"),
-                image=page_img, page=i + 1, pages=total, control=control,
-                page_size_mm=size_mm)
-        except ScanCancelled:
-            break  # finished pages stay valid; the cut-off job is marked error
-        if on_page_done:
-            on_page_done(result)
-        results.append(result)
+    with pdfio.PdfReader(source_path) as pdf:  # opened once, not per page (v0.2.0)
+        total = pdf.page_count()
+        for i in range(total):
+            if skip_pages and (i + 1) in skip_pages:
+                on_progress(f"Page {i + 1}/{total} already scanned — skipped.")
+                continue
+            on_progress(f"PDF page {i + 1}/{total}...")
+            try:
+                if control:
+                    control.checkpoint()
+                page_img = pdf.render_page(i)
+                # Real paper size measured BEFORE any scanning — it drives the
+                # Sectioned-Scan grid (A4 vs A0 must not split the same; v0.1.5).
+                size_mm = pdf.page_size_mm(i)
+                result = run_job(
+                    f"{source_path}#page={i + 1}", settings,
+                    on_progress=lambda m, p=i + 1: on_progress(f"Page {p}/{total}: {m}"),
+                    image=page_img, page=i + 1, pages=total, control=control,
+                    page_size_mm=size_mm)
+            except ScanCancelled:
+                break  # finished pages stay valid; the cut-off job is marked error
+            if on_page_done:
+                on_page_done(result)
+            results.append(result)
     return results
 
 
@@ -149,25 +191,61 @@ def run_job(source_path: str, settings: Settings,
     `page_size_mm` = physical paper size (PDF pages); image files fall back to
     their DPI metadata, and pixel heuristics only when nothing is known.
     """
-    job_dir = _new_job_dir()
-    job_id = store.create_job(source_path, str(job_dir), settings.languages)
+    # Resume hygiene: clear any previous error/processing attempt for this exact
+    # page before re-scanning, so a resumed batch never piles up duplicate jobs
+    # for the same page (audit: done_pages only saw 'done', so errored pages were
+    # re-scanned as brand-new jobs each cycle).
+    _clear_failed_attempts(source_path)
+
+    # Folder name comes from the DB id (monotonic, never reused) — not a glob of
+    # on-disk folders. This ends the job_0002 → job_0002_1_1_1 collision chain
+    # that made archived jobs look like they "came back" (v0.2.0).
+    with _SCAN_LOCK:
+        job_id = store.create_job(source_path, "", settings.languages)
+        job_dir = paths.JOBS_DIR / f"job_{job_id:04d}"
+        job_dir.mkdir(parents=True, exist_ok=True)
+        store.update_job_dir(job_id, str(job_dir))
+        try:
+            result = _scan(source_path, job_dir, job_id, settings, on_progress,
+                           image=image, control=control, page_size_mm=page_size_mm)
+            result.page, result.pages = page, pages
+            _persist(result, settings)
+            return result
+        except ScanCancelled:
+            store.fail_job(job_id, "cancelled by user")
+            _write_error_result(job_dir, job_id, source_path, "cancelled by user", page, pages)
+            raise
+        except Exception as exc:
+            store.fail_job(job_id, repr(exc))
+            _write_error_result(job_dir, job_id, source_path, repr(exc), page, pages)
+            raise
+
+
+def _clear_failed_attempts(source_path: str) -> None:
+    """Remove prior non-done jobs for this exact Source/page (folder + rows) so a
+    resume replaces a failed attempt instead of stacking another duplicate."""
+    for j in store.jobs_for_exact_source(source_path):
+        if j["status"] != "done":
+            shutil.rmtree(j["job_dir"], ignore_errors=True)
+            store.delete_job(j["id"])
+
+
+def _write_error_result(job_dir: Path, job_id: int, source_path: str,
+                        error: str, page: int | None, pages: int | None) -> None:
+    """Write a minimal result.json for a failed/cancelled job so the Open-Claw
+    contract (every job folder has a result.json) holds and GET /jobs/{id}/result
+    returns the error instead of a bare 404 (v0.2.0)."""
+    payload = {"job_id": job_id, "source_path": source_path, "status": "error",
+               "error": error,
+               "created_at": datetime.now().isoformat(timespec="seconds"),
+               "full_text": "", "words": [], "sections": []}
+    if page is not None:
+        payload["page"], payload["pages"] = page, pages
     try:
-        result = _scan(source_path, job_dir, job_id, settings, on_progress,
-                       image=image, control=control, page_size_mm=page_size_mm)
-        result.page, result.pages = page, pages
-        _persist(result, settings)
-        return result
-    except Exception as exc:
-        store.fail_job(job_id, repr(exc))
-        raise
-
-
-def _new_job_dir() -> Path:
-    """Create the next jobs/job_NNNN folder."""
-    existing = [int(p.name.split("_")[1]) for p in paths.JOBS_DIR.glob("job_*") if p.name.split("_")[1].isdigit()]
-    job_dir = paths.JOBS_DIR / f"job_{(max(existing) + 1 if existing else 1):04d}"
-    job_dir.mkdir(parents=True)
-    return job_dir
+        (Path(job_dir) / "result.json").write_text(
+            json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
+    except OSError:
+        pass  # best-effort — the DB row already records the error
 
 
 def _scan(source_path: str, job_dir: Path, job_id: int, settings: Settings,
@@ -199,8 +277,9 @@ def _scan(source_path: str, job_dir: Path, job_id: int, settings: Settings,
 
     on_progress("Full-image pass...")
     langs = settings.languages
+    auto_lang = settings.auto_language and "tha" in settings.languages
     full_words = engine.ocr_words(pre, langs)
-    if settings.auto_language and "tha" in langs and latin_only_page(full_words):
+    if auto_lang and latin_only_page(full_words):
         # English-only drawing: a tha+eng pass sprays stray Thai glyphs over the
         # line work. Re-run clean — real Thai pages keep both languages.
         langs = "eng"
@@ -281,6 +360,18 @@ def _scan(source_path: str, job_dir: Path, job_id: int, settings: Settings,
 
     on_progress("Stitching...")
     merged = _dedupe(all_words)
+
+    # Re-judge English-only against the FULL stitched evidence, not just the
+    # first (weakest) full pass — the sparse/tile/rescue passes hallucinate Thai
+    # far harder, and the old verdict was made before they ran. Then drop any
+    # Thai token that slipped through: the safety net the pipeline lacked. A
+    # phantom Thai glyph is a wrong symbol, so removing it is correct — the
+    # section crop is still queued for AI Boost when it's genuinely unclear.
+    eng_only = auto_lang and (langs == "eng" or latin_only_page(merged))
+    if eng_only:
+        langs = "eng"
+        merged = [w for w in merged if not _mostly_thai(w.text)]
+    merged = [w for w in merged if not _is_line_noise(w.text)]
 
     # Section verdicts come AFTER the stitch, from the best merged knowledge —
     # a tile that only saw half a label is fine when the seam pass or the full

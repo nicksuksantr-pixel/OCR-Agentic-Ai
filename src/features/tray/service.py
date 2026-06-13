@@ -33,6 +33,7 @@ class TrayIcon:
     def __init__(self, app_name: str, on_open, on_quit):
         icon_path = paths.asset("icon.png")
         image = Image.open(icon_path) if icon_path.exists() else _eye_image()
+        self._running = False  # our own flag — don't depend on pystray internals
         self._icon = pystray.Icon(
             app_name, icon=image, title=f"{app_name} — running",
             menu=pystray.Menu(
@@ -42,13 +43,25 @@ class TrayIcon:
 
     @property
     def visible(self) -> bool:
-        return self._icon.visible
+        return self._running
 
     def start(self) -> None:
-        """Show the tray icon (own message-loop thread; no-op if already up)."""
-        if not self._icon._running:  # pystray exposes no public 'started' flag
+        """Show the tray icon (own message-loop thread; no-op if already up).
+        Wrapped so a tray failure can never block the window's close handler."""
+        if self._running:
+            return
+        try:
             self._icon.run_detached()
+            self._running = True
+        except Exception:
+            self._running = False  # tray unavailable — caller still hides/quits fine
 
     def stop(self) -> None:
-        if self._icon._running:
+        if not self._running:
+            return
+        try:
             self._icon.stop()
+        except Exception:
+            pass
+        finally:
+            self._running = False

@@ -4,6 +4,10 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import os as _os, tempfile as _tempfile  # noqa: E402 — isolate the test store
+_os.environ.setdefault("OCR_AGENTIC_DATA_DIR",
+                       str(Path(_tempfile.gettempdir()) / "ocr-agentic-tests"))
+
 sys.stdout.reconfigure(encoding="utf-8")
 
 from src.core.config import paths

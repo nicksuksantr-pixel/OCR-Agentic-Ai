@@ -11,6 +11,7 @@ any model may be used. Free tier is hard-locked to FREE_MODEL regardless of
 what settings.gemini_model says.
 """
 import json
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -26,6 +27,15 @@ PAID_SECONDS_BETWEEN_REQUESTS = 0.5  # paid tier: gentle pacing only — never h
 FREE_MODEL = "gemini-3.1-flash-lite"  # the only model allowed until paid tier is unlocked
 # Pacific approximated as UTC-7 (PDT). Off by 1h half the year — fine for a soft cap.
 _PACIFIC_OFFSET = timedelta(hours=-7)
+# One drain at a time across the GUI auto-boost and a manual / API /boost/run —
+# two concurrent drains used to read the same pending rows and double-spend the
+# daily cap (v0.2.0). Claiming each item is also atomic (store.claim_boost).
+_DRAIN_LOCK = threading.Lock()
+_USAGE_LOCK = threading.Lock()
+# Substrings that mean "the key/credentials are wrong" (not a transient network
+# blip) — reported plainly instead of silently requeuing the item forever.
+_AUTH_HINTS = ("api key", "api_key", "401", "403", "permission_denied",
+               "unauthenticated", "invalid argument", "invalid_argument")
 
 
 @dataclass
@@ -46,6 +56,16 @@ def send_pending(settings: Settings, on_progress=lambda msg: None) -> BoostRunSu
         summary.stopped_reason = "No Gemini API key — set it in Settings."
         return summary
 
+    if not _DRAIN_LOCK.acquire(blocking=False):
+        summary.stopped_reason = "A Boost run is already in progress."
+        return summary
+    try:
+        return _drain(settings, summary, on_progress)
+    finally:
+        _DRAIN_LOCK.release()
+
+
+def _drain(settings: Settings, summary: "BoostRunSummary", on_progress) -> "BoostRunSummary":
     items = store.pending_boost_items()
     if not items:
         summary.stopped_reason = "Boost Queue is empty."
@@ -59,28 +79,33 @@ def send_pending(settings: Settings, on_progress=lambda msg: None) -> BoostRunSu
             summary.stopped_reason = (f"Daily cap reached ({settings.boost_daily_cap} requests) — "
                                       "resumes after the free-tier reset (≈14:00-15:00 Thai).")
             break
+
+        # Atomically take the item; if another drain already grabbed it, skip.
+        if not store.claim_boost(item["id"]):
+            continue
+        if not Path(item["crop_path"]).exists():
+            store.fail_boost(item["id"], requeue=False)
+            summary.failed += 1
+            summary.errors.append(f"item {item['id']}: crop file missing")
+            continue
         if n > 0:
             time.sleep(PAID_SECONDS_BETWEEN_REQUESTS if settings.paid_tier
                        else SECONDS_BETWEEN_REQUESTS)  # free: stay under 15 RPM
 
         on_progress(f"Boosting section {item['section_idx']} of job {item['job_id']} "
                     f"({n + 1}/{len(items)})...")
-        if not Path(item["crop_path"]).exists():
-            store.fail_boost(item["id"], requeue=False)
-            summary.failed += 1
-            summary.errors.append(f"item {item['id']}: crop file missing")
-            continue
-
-        store.mark_boost_sent(item["id"])
         summary.sent += 1
         _count_request()  # counts the attempt — quota is spent even when the call fails
         try:
             ai_text = gemini.boost_section(item["crop_path"], item["local_text"], model)
         except Exception as exc:
-            # Network/quota/API problem: requeue and stop — try again next time online.
-            store.fail_boost(item["id"], requeue=True)
+            store.fail_boost(item["id"], requeue=True)  # requeue so a fix resumes it
             summary.sent -= 1
-            summary.stopped_reason = f"Send failed, item requeued: {exc}"
+            if _is_auth_error(exc):
+                summary.stopped_reason = ("Gemini rejected the key — check the API key in "
+                                          "Settings (a free key also 429s on the paid tier).")
+            else:
+                summary.stopped_reason = f"Send failed, item requeued: {exc}"
             summary.errors.append(repr(exc))
             break
 
@@ -90,6 +115,12 @@ def send_pending(settings: Settings, on_progress=lambda msg: None) -> BoostRunSu
         summary.answered += 1
 
     return summary
+
+
+def _is_auth_error(exc: Exception) -> bool:
+    """True when the failure smells like bad credentials, not a network blip."""
+    text = repr(exc).lower()
+    return any(hint in text for hint in _AUTH_HINTS)
 
 
 def _update_result_json(job_dir: str, section_idx: int, ai_text: str) -> None:
@@ -135,6 +166,7 @@ def used_today() -> int:
 
 
 def _count_request() -> None:
-    usage = _read_usage()
-    usage["count"] += 1
-    USAGE_PATH.write_text(json.dumps(usage), encoding="utf-8")
+    with _USAGE_LOCK:  # read-modify-write must not lose increments under concurrency
+        usage = _read_usage()
+        usage["count"] += 1
+        USAGE_PATH.write_text(json.dumps(usage), encoding="utf-8")

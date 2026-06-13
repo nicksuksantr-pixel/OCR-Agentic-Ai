@@ -44,7 +44,8 @@ def build_introduction(settings: Settings, version: str) -> dict:
                 "words": "merged final words with x/y/w/h positions and 0-100 confidence",
                 "boost_queue": "unclear sections: status pending|sent|answered|failed, local_text, ai_text",
             },
-            "job_folder_layout": "jobs/job_NNNN/: original.<ext> + section_NN.png crops + result.json (full Raw Extract incl. ai_boosts). A PDF Source makes one job per page: source recorded as path#page=N, result.json gains additive page/pages fields, original.png is the rendered page. overlay.png (optional, additive) is a confidence-colored word-box render made on demand by the GUI",
+            "job_folder_layout": "jobs/job_NNNN/ where NNNN = the jobs.id (zero-padded, stable for the life of the store — folder name and DB id always match): original.<ext> + section_NN.png crops + result.json (full Raw Extract incl. ai_boosts). A PDF Source makes one job per page: source recorded as path#page=N, result.json gains additive page/pages fields, original.png is the rendered page. A failed/cancelled job still writes a minimal result.json (status='error', error message, empty words/sections) so every job folder has one. overlay.png (optional, additive) is a confidence-colored word-box render made on demand by the GUI",
+            "single_store_note": "v0.2.0: dev runs and the installed .exe now share ONE Shared Store at this db_path (previously they diverged). OCR_AGENTIC_DATA_DIR overrides the location.",
         },
         "interfaces": {
             "watched_folder": {
@@ -82,6 +83,11 @@ def build_introduction(settings: Settings, version: str) -> dict:
                            "rescued/rescue_method fields in result.json",
             "adaptive_grid": "the section grid scales with image size (configured grid is "
                              "the minimum, capped at 7x7) — bigger scans get more tiles",
+            "language_detection": "languages_read lists what the engine CAN read; "
+                                  "auto_language drops the Thai pass on Latin-dominant pages "
+                                  "and filters any stray Thai token, so result.json "
+                                  "languages_used may be 'eng' even though languages_read "
+                                  "includes 'tha' — trust languages_used per job",
         },
     }
 

@@ -32,13 +32,15 @@ def configure(settings: Settings) -> str | None:
             return ("Tesseract not found. Install it (winget install UB-Mannheim.TesseractOCR) "
                     "or set the path in Settings.")
     pytesseract.pytesseract.tesseract_cmd = exe
-    # Language models (eng/tha): user data dir wins, else the bundled set.
-    # Env var (not --tessdata-dir) avoids config quoting issues — a quoted
-    # path reaches tesseract with the quotes embedded.
-    if any(paths.TESSDATA_DIR.glob("*.traineddata")):
-        os.environ["TESSDATA_PREFIX"] = str(paths.TESSDATA_DIR)
-    elif paths.bundled_tessdata():
-        os.environ["TESSDATA_PREFIX"] = str(paths.bundled_tessdata())
+    # Language models (eng/tha): first dir that actually has *.traineddata wins
+    # (Shared Store tessdata → project data\tessdata → bundled). Env var (not
+    # --tessdata-dir) avoids config quoting issues — a quoted path reaches
+    # tesseract with the quotes embedded. The project-tree fallback keeps a dev
+    # run reading `tha` after the store moved to %LOCALAPPDATA% (v0.2.0).
+    for td in paths.tessdata_dirs():
+        if any(td.glob("*.traineddata")):
+            os.environ["TESSDATA_PREFIX"] = str(td)
+            break
     return None
 
 

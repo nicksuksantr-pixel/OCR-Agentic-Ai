@@ -2,13 +2,23 @@
 
 Schema: jobs (one per Source) · sections (Sectioned Scan tiles) · words (merged
 final words with position+confidence) · boost_queue (unclear sections waiting
-for AI when online). All labels/fields English per CONTEXT language policy.
+for AI when online) · meta (store identity, additive v0.2.0). All labels/fields
+English per CONTEXT language policy.
+
+Concurrency (v0.2.0): the GUI thread, the scan worker, the inbox watcher and the
+ThreadingHTTPServer API all open this DB. WAL + a busy timeout let them read and
+write at once without "database is locked", and the one-time additive migration
+runs under a lock so two threads never ALTER the same table at the same moment.
 """
 import json
 import sqlite3
+import threading
+import uuid
 from datetime import datetime
 
 from src.core.config import paths
+
+SCHEMA_VERSION = 2  # bump only on an additive schema change (Open-Claw contract)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (
@@ -51,36 +61,124 @@ CREATE TABLE IF NOT EXISTS boost_queue (
     answered_at TEXT,
     ai_text     TEXT
 );
+CREATE TABLE IF NOT EXISTS meta (
+    key   TEXT PRIMARY KEY,                           -- store identity (v0.2.0 additive)
+    value TEXT
+);
 """
 
 
 _migrated = False
+_migrate_lock = threading.Lock()
 
 
 def _connect() -> sqlite3.Connection:
-    """Open the Shared Store DB (created on first use), rows as dicts."""
+    """Open the Shared Store DB (created on first use), rows as dicts.
+
+    WAL + a 30 s busy timeout make concurrent reads/writes safe across the GUI,
+    scan, watcher and API threads. The additive migration runs exactly once,
+    guarded by a lock so two threads never race the same ALTER."""
     global _migrated
-    con = sqlite3.connect(paths.DB_PATH)
+    paths.DB_PATH.parent.mkdir(parents=True, exist_ok=True)  # store is self-sufficient
+    con = sqlite3.connect(paths.DB_PATH, timeout=30.0)
     con.row_factory = sqlite3.Row
-    con.executescript(_SCHEMA)
-    if not _migrated:  # v0.1.2 additive columns for DBs created before them
-        cols = {r[1] for r in con.execute("PRAGMA table_info(jobs)")}
-        if "label" not in cols:
-            con.execute("ALTER TABLE jobs ADD COLUMN label TEXT")
-        if "archived" not in cols:
-            con.execute("ALTER TABLE jobs ADD COLUMN archived INTEGER NOT NULL DEFAULT 0")
-        _migrated = True
+    con.execute("PRAGMA busy_timeout=30000")
+    if not _migrated:
+        with _migrate_lock:
+            if not _migrated:
+                con.executescript(_SCHEMA)
+                try:
+                    con.execute("PRAGMA journal_mode=WAL")
+                except sqlite3.Error:
+                    pass  # WAL needs a real file; :memory:/odd FS → default journal
+                cols = {r[1] for r in con.execute("PRAGMA table_info(jobs)")}
+                if "label" not in cols:  # v0.1.2 additive columns for older DBs
+                    con.execute("ALTER TABLE jobs ADD COLUMN label TEXT")
+                if "archived" not in cols:
+                    con.execute("ALTER TABLE jobs ADD COLUMN archived INTEGER NOT NULL DEFAULT 0")
+                _stamp_identity(con)
+                con.commit()
+                _migrated = True
     return con
 
 
+def _stamp_identity(con: sqlite3.Connection) -> None:
+    """Record a stable store uuid + schema version once (additive meta table).
+    Lets a future Open-Claw / a future build detect which store it opened
+    instead of silently presenting a divergent DB as current."""
+    have = {r["key"] for r in con.execute("SELECT key FROM meta")}
+    if "store_uuid" not in have:
+        con.execute("INSERT INTO meta (key, value) VALUES ('store_uuid', ?)",
+                    (uuid.uuid4().hex,))
+    con.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)",
+                (str(SCHEMA_VERSION),))
+
+
+def set_meta(key: str, value: str) -> None:
+    """Write one meta value (e.g. last_app_version on each start)."""
+    with _connect() as con:
+        con.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (key, value))
+
+
+def get_meta(key: str) -> str | None:
+    """Read one meta value (None when unset)."""
+    with _connect() as con:
+        row = con.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+        return row["value"] if row else None
+
+
 def create_job(source_path: str, job_dir: str, languages: str) -> int:
-    """Insert a new Job row and return its id."""
+    """Insert a new Job row and return its id.
+
+    job_dir may be '' at first: v0.2.0 names the folder from this returned id
+    (job_<id:04d>) so the on-disk folder and the DB id never diverge, then calls
+    update_job_dir(). That ends the old glob-based numbering that produced reused
+    names like job_0002 → job_0002_1_1_1 after archive/delete."""
     with _connect() as con:
         cur = con.execute(
             "INSERT INTO jobs (created_at, source_path, job_dir, languages) VALUES (?,?,?,?)",
             (datetime.now().isoformat(timespec="seconds"), source_path, job_dir, languages),
         )
         return cur.lastrowid
+
+
+def update_job_dir(job_id: int, job_dir: str) -> None:
+    """Set a job's folder path (after it is named from the DB id)."""
+    with _connect() as con:
+        con.execute("UPDATE jobs SET job_dir=? WHERE id=?", (job_dir, job_id))
+
+
+def jobs_for_source(source: str, include_archived: bool = False) -> list[dict]:
+    """Every page-job of one Source file, page order — queried in SQL with NO
+    arbitrary limit (the old code scanned list_jobs(500), so files past the
+    newest 500 jobs silently escaped delete/export). Matches both the bare
+    source (single image) and source#page=N (PDF pages)."""
+    clause = "" if include_archived else " AND archived=0"
+    with _connect() as con:
+        rows = con.execute(
+            "SELECT id, created_at, source_path, status, mean_conf, label, job_dir "
+            f"FROM jobs WHERE (source_path = ? OR source_path LIKE ?){clause} "
+            "ORDER BY id",
+            (source, source + "#page=%")).fetchall()
+    out = [dict(r) for r in rows]
+    out.sort(key=lambda j: _page_num(j["source_path"]))
+    return out
+
+
+def jobs_for_exact_source(source_path: str) -> list[dict]:
+    """Jobs whose source_path matches EXACTLY (one image, or one PDF page) —
+    used on resume to clear a previous error/processing attempt for that page
+    before re-scanning it, so resume never piles up duplicates."""
+    with _connect() as con:
+        rows = con.execute(
+            "SELECT id, status, job_dir FROM jobs WHERE source_path=? AND archived=0",
+            (source_path,)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def _page_num(source_path: str) -> int:
+    _, _, page = source_path.partition("#page=")
+    return int(page) if page.isdigit() else 0
 
 
 def finish_job(job_id: int, full_text: str, mean_conf: float) -> None:
@@ -182,11 +280,13 @@ def archived_jobs() -> list[dict]:
 
 
 def done_pages(source_path: str) -> set[int]:
-    """Page numbers of a PDF Source already scanned successfully — lets an
-    interrupted batch resume instead of starting over."""
+    """Page numbers of a PDF Source already accounted for — lets an interrupted
+    batch resume instead of starting over. Counts both finished pages AND pages
+    the user archived (archive = 'I already have this page', recycle-bin model):
+    archiving a few pages must NOT force a 4-min/page re-scan of them (v0.2.0)."""
     with _connect() as con:
         rows = con.execute(
-            "SELECT source_path FROM jobs WHERE status='done' AND archived=0 "
+            "SELECT source_path FROM jobs WHERE status='done' "
             "AND source_path LIKE ?", (source_path + "#page=%",)).fetchall()
     pages = set()
     for r in rows:
@@ -198,7 +298,11 @@ def done_pages(source_path: str) -> set[int]:
 
 def fail_orphans() -> int:
     """App start: any job still 'processing' was cut off by a previous exit —
-    mark it errored so it stops looking alive. Returns how many were closed."""
+    mark it errored so it stops looking alive. Returns how many were closed.
+
+    Safe to mark all of them: the session-global single-instance mutex (main.py)
+    means no other instance — dev or installed — is scanning into the same store
+    when this runs at startup."""
     with _connect() as con:
         return con.execute(
             "UPDATE jobs SET status='error', "
@@ -267,6 +371,18 @@ def mark_boost_sent(item_id: int) -> None:
     """Flag an item as in-flight so a crash never double-sends it silently."""
     with _connect() as con:
         con.execute("UPDATE boost_queue SET status='sent' WHERE id=?", (item_id,))
+
+
+def claim_boost(item_id: int) -> bool:
+    """Atomically take a pending item (pending → sent). Returns False when some
+    other drain (the GUI auto-boost vs a manual/API run) already claimed it, so
+    the same crop is never sent to Gemini twice and the daily cap isn't double
+    counted (v0.2.0)."""
+    with _connect() as con:
+        cur = con.execute(
+            "UPDATE boost_queue SET status='sent' WHERE id=? AND status='pending'",
+            (item_id,))
+        return cur.rowcount == 1
 
 
 def complete_boost(item_id: int, section_id: int, ai_text: str) -> None:

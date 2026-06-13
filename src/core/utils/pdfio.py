@@ -46,13 +46,51 @@ def render_page(path: str | Path, index: int, dpi: int = PDF_DPI) -> Image.Image
     """Render one page (0-based) to a grayscale-friendly RGB image."""
     pdf = pdfium.PdfDocument(str(path))
     try:
-        page = pdf[index]
-        scale = dpi / 72.0  # PDF user space is 72 units per inch
-        w, h = page.get_size()
-        if (w * scale) * (h * scale) > MAX_PAGE_PIXELS:
-            scale = (MAX_PAGE_PIXELS / (w * h)) ** 0.5
-        img = page.render(scale=scale).to_pil().convert("RGB")
-        page.close()
-        return img
+        return _render(pdf, index, dpi)
     finally:
         pdf.close()
+
+
+def _render(pdf, index: int, dpi: int) -> Image.Image:
+    page = pdf[index]
+    scale = dpi / 72.0  # PDF user space is 72 units per inch
+    w, h = page.get_size()
+    if (w * scale) * (h * scale) > MAX_PAGE_PIXELS:
+        scale = (MAX_PAGE_PIXELS / (w * h)) ** 0.5
+    img = page.render(scale=scale).to_pil().convert("RGB")
+    page.close()
+    return img
+
+
+class PdfReader:
+    """Open a PDF once and read every page from the same handle — a 45-page,
+    16 MB drawing used to be opened/parsed ~91 times (page_count + size + render
+    each reopened the file), which lengthened the perceived 'hang'. Use as a
+    context manager so the handle is always closed (v0.2.0)."""
+
+    def __init__(self, path: str | Path):
+        self._pdf = pdfium.PdfDocument(str(path))
+
+    def __enter__(self) -> "PdfReader":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
+
+    def __len__(self) -> int:
+        return len(self._pdf)
+
+    def page_count(self) -> int:
+        return len(self._pdf)
+
+    def page_size_mm(self, index: int) -> tuple[float, float]:
+        page = self._pdf[index]
+        w_pt, h_pt = page.get_size()
+        page.close()
+        return (w_pt / 72.0 * 25.4, h_pt / 72.0 * 25.4)
+
+    def render_page(self, index: int, dpi: int = PDF_DPI) -> Image.Image:
+        return _render(self._pdf, index, dpi)
+
+    def close(self) -> None:
+        self._pdf.close()
