@@ -7,7 +7,7 @@ JobsController so the tab never freezes (v0.2.0 redesign; before this everything
 ran on the Tk main thread and the window 'hung / wouldn't refresh').
 """
 import tkinter
-from tkinter import filedialog, messagebox
+from tkinter import filedialog
 
 import customtkinter as ctk
 from PIL import Image
@@ -16,7 +16,7 @@ from src.core.config.settings import Settings
 from src.features.jobs import service
 from src.features.jobs.controller import JobsController
 from src.shared.ui import theme
-from src.shared.ui.widgets import add_tooltip
+from src.shared.ui.widgets import (add_tooltip, ask_yesno, show_info, show_warning)
 
 PREVIEW_MAX = (360, 230)   # job preview thumbnail box
 OVERLAY_MAX = (1100, 720)  # overlay viewer window canvas
@@ -365,7 +365,7 @@ class JobsView(ctk.CTkFrame):
 
     def _open_folder(self) -> None:
         if self.current_job and not service.open_job_folder(self.current_job["id"]):
-            messagebox.showwarning("Jobs", "Could not open the job folder.", parent=self)
+            show_warning(self, "Jobs", "Could not open the job folder.")
 
     def _copy_text(self) -> None:
         if not self.current_job:
@@ -390,19 +390,19 @@ class JobsView(ctk.CTkFrame):
         fn = service.export_text if fmt == "txt" else service.export_json
         self.controller.run(
             lambda: fn(source, dest),
-            lambda pages: self._post(lambda: messagebox.showinfo(
-                "Export", f"Exported {pages} page(s) to:\n{dest}", parent=self)),
+            lambda pages: self._post(lambda: show_info(
+                self, "Export", f"Exported {pages} page(s) to:\n{dest}")),
             on_error=lambda exc: self._post(self._render_error, exc))
 
     def _archive(self) -> None:
         job = self.current_job
         if not job:
             return
-        if not messagebox.askyesno(
-                "Archive job",
+        if not ask_yesno(
+                self, "Archive job",
                 f'Archive job #{job["id"]}?\n\nIt leaves the list and its folder '
                 "moves to jobs\\_trash. Nothing is deleted — Empty trash removes "
-                "it for good.", parent=self):
+                "it for good."):
             return
         self._run_mutation(lambda: service.archive_job(job["id"]),
                            "🗂 Job archived (recoverable from jobs\\_trash).")
@@ -411,9 +411,9 @@ class JobsView(ctk.CTkFrame):
         job = self.current_job
         if not job:
             return
-        if not messagebox.askyesno(
-                "Delete page", f'Permanently delete job #{job["id"]}?\n'
-                "Its folder and data are gone for good.", parent=self):
+        if not ask_yesno(
+                self, "Delete page", f'Permanently delete job #{job["id"]}?\n'
+                "Its folder and data are gone for good.", kind="warn"):
             return
         self._run_mutation(lambda: service.delete_job(job["id"]),
                            "🗑 Job deleted.")
@@ -425,38 +425,38 @@ class JobsView(ctk.CTkFrame):
         source = job["source_path"].split("#page=")[0]
         name = source.replace("\\", "/").rsplit("/", 1)[-1]
         count = service.source_job_count(source)
-        if not messagebox.askyesno(
-                "Delete whole file",
+        if not ask_yesno(
+                self, "Delete whole file",
                 f'Permanently delete ALL {count} scanned page(s) of "{name}"?\n'
-                "Every page folder and its data are gone for good.", parent=self):
+                "Every page folder and its data are gone for good.", kind="warn"):
             return
         self._run_mutation(lambda: service.delete_source(source),
                            f"🗑 Deleted all pages of {name}.")
 
     def _delete_selected(self) -> None:
         ids = sorted(self.selected)
-        if not ids or not messagebox.askyesno(
-                "Delete selected",
+        if not ids or not ask_yesno(
+                self, "Delete selected",
                 f"Permanently delete {len(ids)} selected job(s)?\n"
-                "Their folders and data are gone for good.", parent=self):
+                "Their folders and data are gone for good.", kind="warn"):
             return
         self._run_mutation(lambda: [service.delete_job(i) for i in ids] and None,
                            f"🗑 Deleted {len(ids)} job(s).", clear_selection=True)
 
     def _archive_selected(self) -> None:
         ids = sorted(self.selected)
-        if not ids or not messagebox.askyesno(
-                "Archive selected",
+        if not ids or not ask_yesno(
+                self, "Archive selected",
                 f"Archive {len(ids)} selected job(s) to jobs\\_trash?\n"
-                "Nothing is deleted.", parent=self):
+                "Nothing is deleted."):
             return
         self._run_mutation(lambda: [service.archive_job(i) for i in ids] and None,
                            f"🗂 Archived {len(ids)} job(s).", clear_selection=True)
 
     def _empty_trash(self) -> None:
-        if not messagebox.askyesno(
-                "Empty trash", "Permanently delete ALL archived jobs (jobs\\_trash)?\n"
-                "This cannot be undone.", parent=self):
+        if not ask_yesno(
+                self, "Empty trash", "Permanently delete ALL archived jobs (jobs\\_trash)?\n"
+                "This cannot be undone.", kind="warn"):
             return
         self._run_mutation(service.empty_trash, "🧹 Trash emptied.")
 
@@ -511,7 +511,7 @@ class JobsView(ctk.CTkFrame):
     def _show_overlay(self, job_id: int, payload: dict) -> None:
         out, thumb = payload["path"], payload["thumb"]
         if out is None or thumb is None:
-            messagebox.showwarning("Overlay", "No original image for this job.", parent=self)
+            show_warning(self, "Overlay", "No original image for this job.")
             return
         win = ctk.CTkToplevel(self)
         win.title(f'Overlay — job #{job_id} (green ≥75 · yellow ≥60 · red <60)')

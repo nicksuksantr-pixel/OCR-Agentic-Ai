@@ -12,6 +12,10 @@ _os.environ.setdefault("OCR_AGENTIC_DATA_DIR",
 
 sys.stdout.reconfigure(encoding="utf-8")
 
+import time  # noqa: E402
+
+from PIL import Image as _PILImage  # noqa: E402
+
 from src.app.app import App
 from src.core.models.ocr import Word
 from src.core.services import store
@@ -33,6 +37,8 @@ def main() -> None:
     # --- key widgets exist on each view ---
     checks["scan pick button"] = hasattr(app.scan_view, "pick_btn")
     checks["scan banner refresh"] = hasattr(app.scan_view, "refresh_banners")
+    checks["scan progress bar"] = hasattr(app.scan_view, "progress_bar")
+    checks["scan live preview pane"] = hasattr(app.scan_view, "preview_label")
     checks["jobs list + detail actions"] = (hasattr(app.jobs_view, "job_list")
                                             and len(app.jobs_view._actions) >= 6)
     checks["settings save + tess path"] = (hasattr(app.settings_view, "tess_entry")
@@ -70,6 +76,41 @@ def main() -> None:
                                              and "v9.9.9" in app.update_label.cget("text"))
     checks["settings update hook wired"] = (app.settings_view.on_install_update
                                             == app._install_update_now)
+
+    # --- live scan feed: the page-preview + per-section text stream (v0.2.2) ---
+    fake_page = _PILImage.new("RGB", (200, 280), "white")
+    app.scan_view._on_event({"kind": "page_ready", "image": fake_page,
+                             "size": (200, 280), "sections": 2, "page": 1, "pages": 1})
+    app.scan_view._on_event({"kind": "section", "idx": 0, "sections": 2,
+                             "bbox": (10, 10, 60, 40), "page": 1, "pages": 1})
+    app.scan_view._on_event({"kind": "section_text", "idx": 0, "sections": 2,
+                             "text": "HELLO FROM SECTION", "page": 1, "pages": 1})
+    app.update()
+    checks["live preview rendered"] = app.scan_view._preview_base is not None
+    checks["live section text streamed"] = (
+        "HELLO FROM SECTION" in app.scan_view.result_box.get("1.0", "end"))
+    checks["scan bar advanced"] = app.scan_view.progress_bar.get() >= 0
+
+    # --- dashboard bar moves WITHIN a page from section progress (v0.2.2) ---
+    app.scan_controller.progress = {"source": "x/y.pdf", "page": 1, "pages": 2,
+                                    "section": 3, "sections": 6, "started": time.time()}
+    app.dashboard_view._update_activity()
+    app.update()
+    dash_frac = app.dashboard_view.progress_bar.get()
+    checks["dashboard section-level bar"] = 0 < dash_frac < 1
+    app.scan_controller.progress = None
+
+    # --- themed modal dialog builds + returns the chosen value (v0.2.2) ---
+    from src.shared.ui import widgets as _w
+    top, dlg_result, btns = _w.build_dialog(
+        app, "Confirm", "Proceed?",
+        [("Yes", True, "primary"), ("No", False, "ghost")], "question")
+    app.update()
+    checks["themed dialog builds buttons"] = len(btns) == 2
+    top._choose(True)  # simulate pressing Yes
+    app.update()
+    checks["themed dialog returns choice"] = (dlg_result["value"] is True
+                                              and not top.winfo_exists())
 
     app.destroy()
 

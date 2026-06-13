@@ -21,6 +21,7 @@ from src.core.utils import imaging, pdfio
 
 SECTION_ZOOM = 3.0  # tiles are scanned at 3x — deep-detail mode (Nick: slower is fine)
 ZOOM_MAX_SIDE = 8000  # sanity cap: a zoomed tile never exceeds this side in px
+PREVIEW_MAX = 1100  # live-preview thumbnail max side sent to the Scan tab (v0.2.2)
 RESCUE_ZOOM = 4.0   # rescue pass looks even closer before giving up to the Boost Queue
 SPARSE_PSM = 11     # Tesseract sparse-text mode — scattered labels on drawings
 RESCUE_MIN_WORD_CONF = 45.0  # rescue-variant words below this are noise (esp. inverted runs)
@@ -104,16 +105,30 @@ class ScanControl:
     def __init__(self):
         self._pause = threading.Event()
         self._cancel = threading.Event()
+        self._paused_total = 0.0    # accumulated seconds spent paused (for honest ETA)
+        self._paused_at: float | None = None
 
     def pause(self) -> None:
-        self._pause.set()
+        if not self._pause.is_set():
+            self._paused_at = time.time()
+            self._pause.set()
 
     def resume(self) -> None:
-        self._pause.clear()
+        if self._pause.is_set():
+            if self._paused_at is not None:
+                self._paused_total += time.time() - self._paused_at
+                self._paused_at = None
+            self._pause.clear()
 
     def cancel(self) -> None:
         self._cancel.set()
         self._pause.clear()  # a paused scan must wake up to see the cancel
+
+    def paused_seconds(self) -> float:
+        """Total time spent paused so far — subtracted from elapsed so the ETA
+        does not balloon while a scan sits paused (v0.2.2)."""
+        extra = (time.time() - self._paused_at) if self._paused_at is not None else 0.0
+        return self._paused_total + extra
 
     @property
     def paused(self) -> bool:
@@ -134,7 +149,8 @@ class ScanControl:
 def run_source(source_path: str, settings: Settings,
                on_progress=lambda msg: None, on_page_done=None,
                control: ScanControl | None = None,
-               skip_pages: set[int] | None = None) -> list[JobResult]:
+               skip_pages: set[int] | None = None,
+               on_event=lambda e: None) -> list[JobResult]:
     """Process one Source of any supported kind. A PDF becomes one Job per page
     (source recorded as path#page=N); an image stays a single Job.
 
@@ -142,10 +158,14 @@ def run_source(source_path: str, settings: Settings,
     stream results page by page instead of going silent for the whole batch.
     `control` enables pause/cancel; a cancel keeps every already-finished page
     and returns the partial result list. `skip_pages` resumes an interrupted
-    batch — those page numbers are not scanned again."""
+    batch — those page numbers are not scanned again. `on_event` is the live
+    structured feed (page image + per-section bbox/text) the Scan tab renders so
+    a long single page no longer shows an empty box (v0.2.2); each event is
+    stamped with the page/pages it belongs to here."""
     if not pdfio.is_pdf(source_path):
         try:
-            result = run_job(source_path, settings, on_progress, control=control)
+            result = run_job(source_path, settings, on_progress, control=control,
+                             on_event=lambda e: on_event({**e, "page": 1, "pages": 1}))
         except ScanCancelled:
             return []
         if on_page_done:
@@ -170,7 +190,8 @@ def run_source(source_path: str, settings: Settings,
                     f"{source_path}#page={i + 1}", settings,
                     on_progress=lambda m, p=i + 1: on_progress(f"Page {p}/{total}: {m}"),
                     image=page_img, page=i + 1, pages=total, control=control,
-                    page_size_mm=size_mm)
+                    page_size_mm=size_mm,
+                    on_event=lambda e, p=i + 1, t=total: on_event({**e, "page": p, "pages": t}))
             except ScanCancelled:
                 break  # finished pages stay valid; the cut-off job is marked error
             if on_page_done:
@@ -183,7 +204,8 @@ def run_job(source_path: str, settings: Settings,
             on_progress=lambda msg: None, *, image=None,
             page: int | None = None, pages: int | None = None,
             control: ScanControl | None = None,
-            page_size_mm: tuple[float, float] | None = None) -> JobResult:
+            page_size_mm: tuple[float, float] | None = None,
+            on_event=lambda e: None) -> JobResult:
     """Process one Source end-to-end and persist everything to the Shared Store.
 
     `image` lets a caller hand in an already-rendered PIL image (PDF pages);
@@ -207,7 +229,8 @@ def run_job(source_path: str, settings: Settings,
         store.update_job_dir(job_id, str(job_dir))
         try:
             result = _scan(source_path, job_dir, job_id, settings, on_progress,
-                           image=image, control=control, page_size_mm=page_size_mm)
+                           image=image, control=control, page_size_mm=page_size_mm,
+                           on_event=on_event)
             result.page, result.pages = page, pages
             _persist(result, settings)
             return result
@@ -250,7 +273,8 @@ def _write_error_result(job_dir: Path, job_id: int, source_path: str,
 
 def _scan(source_path: str, job_dir: Path, job_id: int, settings: Settings,
           on_progress, image=None, control: ScanControl | None = None,
-          page_size_mm: tuple[float, float] | None = None) -> JobResult:
+          page_size_mm: tuple[float, float] | None = None,
+          on_event=lambda e: None) -> JobResult:
     """The actual pipeline: orient → full pass → physical-size content grid →
     per-section zoomed pass → seam pass → stitch."""
     on_progress("Loading image...")
@@ -304,12 +328,23 @@ def _scan(source_path: str, job_dir: Path, job_id: int, settings: Settings,
         rows, cols = settings.grid_rows, settings.grid_cols
     boxes, x_cuts, y_cuts = imaging.smart_grid(pre, interior, rows, cols,
                                                settings.overlap_pct)
+
+    # Live preview for the Scan tab: a downscaled copy of the upright page (same
+    # coordinate space as the section boxes) so the UI can show the page and
+    # highlight each tile as it is read, instead of an empty box for the whole
+    # multi-minute page (v0.2.2). `size` lets the view scale the bboxes.
+    preview = pre.copy()
+    preview.thumbnail((PREVIEW_MAX, PREVIEW_MAX))
+    on_event({"kind": "page_ready", "image": preview,
+              "size": (pre.width, pre.height), "sections": len(boxes)})
+
     tiles: list[dict] = []
     all_words: list[Word] = list(full_words)
     for idx, box in enumerate(boxes):
         if control:
             control.checkpoint()  # pause holds here; cancel raises ScanCancelled
         on_progress(f"Section {idx + 1}/{len(boxes)}...")
+        on_event({"kind": "section", "idx": idx, "sections": len(boxes), "bbox": box})
         zoom = _tile_zoom(box)
         tile = imaging.crop_section(pre, box, zoom=zoom)
         # Dual pass per tile too (block + sparse) — deep-detail mode.
@@ -326,7 +361,7 @@ def _scan(source_path: str, job_dir: Path, job_id: int, settings: Settings,
         trigger = max(settings.rescue_trigger_conf, settings.low_conf_threshold)
         if not blank and settings.rescue_enabled and (not words or mean_conf < trigger):
             on_progress(f"Section {idx + 1}/{len(boxes)} rescue...")
-            r_words, r_conf, rescue_method = _rescue(pre, box, langs, words)
+            r_words, r_conf, rescue_method = _rescue(pre, box, langs, words, control=control)
             if r_words and r_conf > mean_conf:
                 words, mean_conf = r_words, r_conf
                 rescued = mean_conf >= settings.low_conf_threshold
@@ -337,6 +372,9 @@ def _scan(source_path: str, job_dir: Path, job_id: int, settings: Settings,
         # queue, no crop on disk (empty table cells used to burn AI quota).
         line_only = not words and (ink < LINE_ONLY_MAX_INK
                                    or imaging.ruled_only(tile))
+        on_event({"kind": "section_text", "idx": idx, "sections": len(boxes),
+                  "text": " ".join(w.text for w in words),
+                  "conf": int(round(mean_conf or 0))})
         tiles.append(dict(idx=idx, box=box, zoom=zoom, blank=blank,
                           line_only=line_only, rescued=rescued,
                           rescue_method=rescue_method))
@@ -401,6 +439,7 @@ def _scan(source_path: str, job_dir: Path, job_id: int, settings: Settings,
         full_text=_reading_order_text(merged), mean_conf=_mean_conf(merged),
         words=merged, sections=sections, languages_used=langs,
         page_rotation=rotation, page_size_mm=page_size_mm,
+        no_text=not merged,  # finished fine but nothing readable (blank/photo) — not a failure
     )
 
 
@@ -411,7 +450,8 @@ def _tile_zoom(box: tuple[int, int, int, int]) -> float:
     return min(SECTION_ZOOM, max(1.0, ZOOM_MAX_SIDE / side))
 
 
-def _rescue(pre, box, langs: str, base_words: list[Word]):
+def _rescue(pre, box, langs: str, base_words: list[Word],
+            control: "ScanControl | None" = None):
     """Self-rescue an unclear section — deep-detail mode: run EVERY variant and
     merge the union (no early stop; Nick: slower is fine, thoroughness wins).
 
@@ -420,6 +460,9 @@ def _rescue(pre, box, langs: str, base_words: list[Word]):
     Variant words below RESCUE_MIN_WORD_CONF are dropped as noise before merging
     (inverted/rotated runs hallucinate on the wrong polarity). The merge keeps
     the highest-confidence word per spot via the normal stitch dedupe.
+    `control` lets Pause/Cancel respond BETWEEN the six variants too, not only
+    between sections — a deep rescue is the slowest single step, so without this
+    a paused scan kept grinding for seconds (Nick, v0.2.2 pause responsiveness).
     Returns (merged words on full image, conf, winning variant label).
     """
     tile = imaging.crop_section(pre, box, zoom=RESCUE_ZOOM)
@@ -435,6 +478,8 @@ def _rescue(pre, box, langs: str, base_words: list[Word]):
         (bw.rotate(90, expand=True), "rotate90", None, 90),   # vertical drawing labels
         (bw.rotate(270, expand=True), "rotate270", None, 270),
     ):
+        if control:
+            control.checkpoint()  # pause holds here between variants; cancel raises
         raw = engine.ocr_words(img, langs, psm=psm)
         if angle:
             raw = [Word(w.text, w.conf, *imaging.unrotate_box((w.x, w.y, w.w, w.h),
@@ -472,6 +517,7 @@ def _persist(result: JobResult, settings: Settings) -> None:
         "page_size_mm": (list(result.page_size_mm)                      # additive (v0.1.5)
                          if result.page_size_mm else None),
         "mean_conf": result.mean_conf,
+        "no_text": result.no_text,                                      # additive (v0.2.2)
         "full_text": result.full_text,
         "words": [asdict(w) for w in result.words],
         "sections": [{**asdict(s), "words": [asdict(w) for w in s.words]}

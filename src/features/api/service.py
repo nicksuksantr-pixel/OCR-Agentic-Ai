@@ -12,7 +12,9 @@ Endpoints (the contract — changes are breaking, note them in V-Log):
   GET  /jobs/{id}/result      → the job folder's result.json (full Raw Extract)
   POST /scan                  → body {"path": "<image or PDF path>"} — scans
                                 synchronously, returns the job summary; a PDF
-                                makes one job per page (additive "jobs" list)
+                                makes one job per page (additive "jobs" list).
+                                Add "async": true to return 202 at once and poll
+                                /jobs + /jobs/{id}/result (v0.2.2, additive)
   POST /boost/run             → drain the Boost Queue now; returns the run summary
 """
 import json
@@ -128,6 +130,21 @@ class ApiServer:
             source = str(body.get("path", "")).strip()
             if not source or not Path(source).is_file():
                 h._send(400, {"error": "body must be {\"path\": \"<existing image or PDF file>\"}"})
+                return
+            if body.get("async"):
+                # Long PDFs can take minutes — async returns at once and the Heart
+                # polls /jobs then /jobs/{id}/result instead of holding the HTTP
+                # connection open the whole scan (additive flag, v0.2.2).
+                def _bg(src=source):
+                    try:
+                        with self._scan_lock:
+                            scan_service.run_source(src, self.settings)
+                    except Exception as exc:  # background — report, never crash the server
+                        self.on_event(f"async scan failed for {src}: {exc!r}")
+                threading.Thread(target=_bg, daemon=True, name="api-scan").start()
+                h._send(202, {"status": "accepted", "async": True, "source": source,
+                              "note": "scanning in the background — poll GET /jobs, "
+                                      "then GET /jobs/{id}/result"})
                 return
             with self._scan_lock:
                 results = scan_service.run_source(source, self.settings)

@@ -6,7 +6,7 @@ Tesseract path is finally editable with a Browse + Re-check so a missing engine
 isn't a dead end, and bad numeric input is reported instead of silently kept
 behind a misleading '✅ Saved.'.
 """
-from tkinter import filedialog, messagebox
+from tkinter import filedialog
 
 import customtkinter as ctk
 
@@ -15,7 +15,7 @@ from src.core.services import engine, gemini
 from src.features.boost.controller import BoostController
 from src.features.boost.service import FREE_MODEL
 from src.features.jobs import service as jobs_service
-from src.shared.ui import theme
+from src.shared.ui import theme, widgets
 
 MODELS = {
     "Gemini 3.1 Flash Lite (free tier)": "gemini-3.1-flash-lite",
@@ -264,8 +264,8 @@ class SettingsView(ctk.CTkFrame):
         self.refresh_update_status()
 
     def _toggle_paid(self) -> None:
-        if self.paid_var.get() and not messagebox.askyesno(
-                "Paid tier", PAID_CONSENT, icon="warning", parent=self):
+        if self.paid_var.get() and not widgets.ask_yesno(
+                self, "Paid tier", PAID_CONSENT, kind="warn"):
             self.paid_var.set(False)
         self._apply_paid_state()
 

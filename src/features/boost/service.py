@@ -135,6 +135,17 @@ def _update_result_json(job_dir: str, section_idx: int, ai_text: str) -> None:
     boosts = payload.setdefault("ai_boosts", [])
     boosts.append({"section_idx": section_idx, "ai_text": ai_text,
                    "answered_at": datetime.now().isoformat(timespec="seconds")})
+    # Also fold the AI reading into the human-readable full_text — mirrors the DB
+    # (store.append_boost_to_job) so the FILE is self-contained. Before this the
+    # corrected text for unclear sections lived ONLY in the ai_boosts array, so
+    # opening result.json (or any view of full_text) made those sections look
+    # empty even though AI had read them (Nick, v0.2.2). Same labelled format as
+    # the DB; one [AI Boost] header, one line per section.
+    ft = payload.get("full_text") or ""
+    if "[AI Boost]" not in ft:
+        ft += "\n\n[AI Boost]"
+    ft += f"\nsection {section_idx}: {ai_text}"
+    payload["full_text"] = ft
     result_path.write_text(json.dumps(payload, ensure_ascii=False, indent=1),
                            encoding="utf-8")
 

@@ -87,19 +87,36 @@ class DashboardView(ctk.CTkFrame):
             self.progress_bar.set(0)
             return
         name = p["source"].replace("\\", "/").rsplit("/", 1)[-1]
-        done, pages = p["done"], p["pages"]
-        if pages:
-            elapsed = time.time() - p["started"]
-            eta = ""
-            if done:
-                remaining = (elapsed / done) * (pages - done)
-                eta = f" · ~{int(remaining // 60)} min {int(remaining % 60)} s left"
-            state = "⏸ PAUSED" if self.scan_controller.paused else "scanning"
-            self.activity_label.configure(text=f"{name} — {state}: page {done}/{pages} done{eta}")
-            self.progress_bar.set(done / pages)
+        pages = p.get("pages") or 0
+        page = p.get("page") or 0
+        sections = p.get("sections") or 0
+        section = p.get("section") or 0
+        state = "⏸ PAUSED" if self.scan_controller.paused else "scanning"
+        if pages and sections:
+            # Smooth fraction across the whole batch: whole finished pages plus the
+            # fraction of the current page's sections that are done (v0.2.2).
+            frac = min(max(((page - 1) + section / sections) / pages, 0.0), 1.0)
+            self.activity_label.configure(
+                text=f"{name} — {state}: page {page}/{pages}, "
+                     f"section {section}/{sections}{self._eta(p, frac)}")
+            self.progress_bar.set(frac)
+        elif pages:
+            # Page known but its grid isn't measured yet — show page-level progress.
+            self.activity_label.configure(text=f"{name} — {state}: page {page}/{pages}...")
+            self.progress_bar.set(max(page - 1, 0) / pages)
         else:
             self.activity_label.configure(text=f"{name} — starting...")
             self.progress_bar.set(0)
+
+    def _eta(self, p: dict, frac: float) -> str:
+        """Time-left estimate from elapsed (minus any paused time) and the smooth
+        fraction done — paused time is excluded so the ETA does not balloon while
+        a scan sits paused (v0.2.2)."""
+        if frac <= 0.02:
+            return ""
+        elapsed = time.time() - p["started"] - self.scan_controller.paused_seconds()
+        remaining = max(elapsed, 0.1) / frac * (1 - frac)
+        return f" · ~{int(remaining // 60)} min {int(remaining % 60)} s left"
 
     def _update_stats(self, s: dict) -> None:
         avg = f'{s["avg_conf"]}%' if s["avg_conf"] is not None else "—"

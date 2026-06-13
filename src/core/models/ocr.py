@@ -47,3 +47,6 @@ class JobResult:
     languages_used: str | None = None    # actual OCR languages after auto-detect (additive, v0.1.3)
     page_rotation: int = 0               # degrees CW the page was turned to be upright (additive, v0.1.5)
     page_size_mm: tuple[float, float] | None = None  # physical paper size driving the grid (additive, v0.1.5)
+    no_text: bool = False                # scan SUCCEEDED but found no readable text — lets the Heart
+                                         # and the UI tell "blank/photo, nothing to read" apart from a
+                                         # failure (both leave full_text empty) (additive, v0.2.2)

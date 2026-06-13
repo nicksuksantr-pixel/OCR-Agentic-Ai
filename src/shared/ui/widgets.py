@@ -107,3 +107,95 @@ class Tooltip:
 def add_tooltip(widget, text: str) -> Tooltip:
     """Attach a hover tooltip; returns it (keep a ref so it isn't GC'd)."""
     return Tooltip(widget, text)
+
+
+# --- themed modal dialogs (v0.2.2) ----------------------------------------
+# Native tkinter messageboxes look nothing like the app (white system chrome on
+# a dark UI). These build a small CTk modal in the app's own theme. The toplevel
+# is built separately from the blocking wait so a headless test can construct +
+# inspect + destroy it without hanging on user input.
+
+_ICON = {"info": ("ℹ", theme.PRIMARY), "warn": ("⚠", theme.WARN),
+         "error": ("❌", theme.DANGER), "question": ("❓", theme.PRIMARY)}
+
+
+def build_dialog(parent, title: str, message: str, buttons: list[tuple],
+                 kind: str = "info"):
+    """Construct (but do not wait on) a themed modal. `buttons` is a list of
+    (label, value, style) where style is 'primary' | 'danger' | 'ghost'.
+    Returns (toplevel, result_holder, button_widgets); result_holder['value']
+    holds the chosen value once a button is pressed."""
+    top = ctk.CTkToplevel(parent)
+    top.title(title)
+    top.transient(parent)
+    top.resizable(False, False)
+    top.configure(fg_color=theme.BG)
+    result = {"value": None}
+
+    body = ctk.CTkFrame(top, fg_color=theme.BG)
+    body.pack(fill="both", expand=True, padx=theme.L, pady=theme.L)
+    glyph, color = _ICON.get(kind, _ICON["info"])
+    head = ctk.CTkFrame(body, fg_color="transparent")
+    head.pack(fill="x", pady=(0, theme.S))
+    ctk.CTkLabel(head, text=glyph, font=theme.font_h1(), text_color=color).pack(side="left", padx=(0, theme.S))
+    ctk.CTkLabel(head, text=title, font=theme.font_h2(), anchor="w").pack(side="left")
+    ctk.CTkLabel(body, text=message, font=theme.font_body(), justify="left",
+                 wraplength=400, anchor="w").pack(fill="x", pady=(0, theme.M))
+    row = ctk.CTkFrame(body, fg_color="transparent")
+    row.pack(fill="x")
+
+    def choose(value):
+        result["value"] = value
+        try:
+            top.grab_release()
+        except Exception:
+            pass
+        top.destroy()
+
+    styles = {"primary": theme.primary_btn, "danger": theme.danger_btn}
+    widgets = []
+    for label, value, style in buttons:  # first button shows rightmost (default action)
+        kw = styles.get(style, theme.ghost_btn)()
+        b = ctk.CTkButton(row, text=label, width=96, command=lambda v=value: choose(v), **kw)
+        b.pack(side="right", padx=theme.XS)
+        widgets.append(b)
+    top.protocol("WM_DELETE_WINDOW", lambda: choose(None))
+    top._choose = choose  # exposed for tests
+    return top, result, widgets
+
+
+def _run_dialog(parent, title, message, buttons, kind="info"):
+    top, result, _ = build_dialog(parent, title, message, buttons, kind)
+    top.update_idletasks()
+    # centre on the parent window
+    try:
+        px, py = parent.winfo_rootx(), parent.winfo_rooty()
+        pw, ph = parent.winfo_width(), parent.winfo_height()
+        w, h = top.winfo_reqwidth(), top.winfo_reqheight()
+        top.geometry(f"+{px + max((pw - w) // 2, 0)}+{py + max((ph - h) // 3, 0)}")
+    except Exception:
+        pass
+    top.after(80, lambda: top.winfo_exists() and top.grab_set())  # modal once viewable
+    parent.wait_window(top)
+    return result["value"]
+
+
+def ask_yesno(parent, title: str, message: str, kind: str = "question") -> bool:
+    return bool(_run_dialog(parent, title, message,
+                            [("Yes", True, "primary"), ("No", False, "ghost")], kind))
+
+
+def ask_yesnocancel(parent, title: str, message: str, kind: str = "warn"):
+    """Returns True (yes) / False (no) / None (cancel) — matches the tkinter call
+    it replaces (e.g. delete this page / all pages / cancel)."""
+    return _run_dialog(parent, title, message,
+                       [("Yes", True, "primary"), ("No", False, "ghost"),
+                        ("Cancel", None, "ghost")], kind)
+
+
+def show_info(parent, title: str, message: str) -> None:
+    _run_dialog(parent, title, message, [("OK", True, "primary")], "info")
+
+
+def show_warning(parent, title: str, message: str) -> None:
+    _run_dialog(parent, title, message, [("OK", True, "primary")], "warn")

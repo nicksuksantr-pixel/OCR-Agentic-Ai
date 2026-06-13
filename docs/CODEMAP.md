@@ -89,13 +89,13 @@
 ### scan
 - `src/features/scan/controller.py`
     • `class ScanController` — Bridges the Scan view and the pipeline; keeps the UI thread free.
-        ↳ engine_ready, scan_file, pause, resume, cancel, paused
+        ↳ engine_ready, scan_file, pause, resume, cancel, paused, paused_seconds
 - `src/features/scan/service.py`
     • `latin_only_page(words)` — True when confident text is overwhelmingly Latin — the page is English
     • `class ScanCancelled` — Raised inside the pipeline when the user cancels a running scan.
     • `class ScanControl` — Pause/cancel signalling for a running scan — checked between sections
-        ↳ pause, resume, cancel, paused, cancelled, checkpoint
-    • `run_source(source_path, settings, on_progress, on_page_done, control, skip_pages)` — Process one Source of any supported kind. A PDF becomes one Job per page
+        ↳ pause, resume, cancel, paused_seconds, paused, cancelled, checkpoint
+    • `run_source(source_path, settings, on_progress, on_page_done, control, skip_pages, on_event)` — Process one Source of any supported kind. A PDF becomes one Job per page
     • `run_job(source_path, settings, on_progress)` — Process one Source end-to-end and persist everything to the Shared Store.
 - `src/features/scan/view.py`
     • `class ScanView` — The Scan tab: select-file + progress + streamed result text.
