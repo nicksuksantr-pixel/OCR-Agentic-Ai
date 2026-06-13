@@ -219,7 +219,8 @@ def export_json(source: str, dest: str) -> int:
     """Combine every page's result.json of a Source into one .json list."""
     payloads = []
     for job in _source_jobs(source):
-        result_path = Path(job["job_dir"]) / "result.json"
+        job_dir = resolve_job_dir(job)  # heal a moved/stale folder (e.g. under _trash)
+        result_path = (job_dir / "result.json") if job_dir else Path(job["job_dir"]) / "result.json"
         if result_path.exists():
             try:
                 payloads.append(json.loads(result_path.read_text(encoding="utf-8")))

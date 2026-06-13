@@ -18,7 +18,7 @@ from datetime import datetime
 
 from src.core.config import paths
 
-SCHEMA_VERSION = 2  # bump only on an additive schema change (Open-Claw contract)
+SCHEMA_VERSION = 3  # bump only on an additive schema change (Open-Claw contract)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (
@@ -65,6 +65,15 @@ CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,                           -- store identity (v0.2.0 additive)
     value TEXT
 );
+-- Secondary indexes (v0.2.3 additive, idempotent). The Heart's hot read path
+-- queries words/sections by job_id and the boost drain filters boost_queue by
+-- status; without these each such read was a full table scan that degraded as
+-- the library grew. CREATE INDEX IF NOT EXISTS runs every start, so existing
+-- stores gain them on the next launch with no migration step.
+CREATE INDEX IF NOT EXISTS idx_words_job     ON words(job_id);
+CREATE INDEX IF NOT EXISTS idx_sections_job  ON sections(job_id);
+CREATE INDEX IF NOT EXISTS idx_boost_status  ON boost_queue(status);
+CREATE INDEX IF NOT EXISTS idx_jobs_archived ON jobs(archived);
 """
 
 
@@ -385,8 +394,42 @@ def claim_boost(item_id: int) -> bool:
         return cur.rowcount == 1
 
 
+def _merge_full_text(con: sqlite3.Connection, job_id: int, section_idx: int,
+                     ai_text: str) -> None:
+    """Append one AI reading to jobs.full_text under a single [AI Boost] header,
+    AT MOST ONCE per section (idempotent — a reconcile/requeue never duplicates).
+    The caller supplies the open connection so the merge can share the answer's
+    transaction (see complete_boost_atomic)."""
+    row = con.execute("SELECT full_text FROM jobs WHERE id=?", (job_id,)).fetchone()
+    if row is None:
+        return
+    full_text = row["full_text"] or ""
+    if f"\nsection {section_idx}:" in full_text:
+        return  # already merged — idempotent
+    if "[AI Boost]" not in full_text:
+        full_text += "\n\n[AI Boost]"
+    full_text += f"\nsection {section_idx}: {ai_text}"
+    con.execute("UPDATE jobs SET full_text=? WHERE id=?", (full_text, job_id))
+
+
+def complete_boost_atomic(item_id: int, section_id: int, job_id: int,
+                          section_idx: int, ai_text: str) -> None:
+    """Record the AI answer, mark the section boosted, AND fold the reading into
+    jobs.full_text — all in ONE transaction (v0.2.3). Before this the answer and
+    the full_text merge were separate connections, so a crash between them left
+    the reading saved in boost_queue.ai_text but missing from full_text (the field
+    the Heart reads) forever, because only 'pending' rows are ever re-drained."""
+    with _connect() as con:
+        con.execute(
+            "UPDATE boost_queue SET status='answered', ai_text=?, answered_at=? WHERE id=?",
+            (ai_text, datetime.now().isoformat(timespec="seconds"), item_id))
+        con.execute("UPDATE sections SET status='boosted' WHERE id=?", (section_id,))
+        _merge_full_text(con, job_id, section_idx, ai_text)
+
+
 def complete_boost(item_id: int, section_id: int, ai_text: str) -> None:
-    """Store the AI answer and mark the section boosted (merge step 1)."""
+    """Answer half only (boost_queue + sections) — prefer complete_boost_atomic,
+    which also folds full_text in the same transaction. Kept for callers/tests."""
     with _connect() as con:
         con.execute(
             "UPDATE boost_queue SET status='answered', ai_text=?, answered_at=? WHERE id=?",
@@ -402,13 +445,40 @@ def fail_boost(item_id: int, requeue: bool) -> None:
 
 
 def append_boost_to_job(job_id: int, section_idx: int, ai_text: str) -> None:
-    """Merge step 2: append the AI reading to the Job's Raw Extract text, clearly labelled."""
+    """Append the AI reading to a Job's Raw Extract text, labelled, at most once
+    per section (idempotent — guarded so a recovery/requeue never duplicates)."""
     with _connect() as con:
-        row = con.execute("SELECT full_text FROM jobs WHERE id=?", (job_id,)).fetchone()
-        if row is None:
-            return
-        full_text = row["full_text"] or ""
-        if "[AI Boost]" not in full_text:
-            full_text += "\n\n[AI Boost]"
-        full_text += f"\nsection {section_idx}: {ai_text}"
-        con.execute("UPDATE jobs SET full_text=? WHERE id=?", (full_text, job_id))
+        _merge_full_text(con, job_id, section_idx, ai_text)
+
+
+def reconcile_boost_merges() -> int:
+    """Repair any answered boost whose reading never reached jobs.full_text (a
+    crash between the answer and the merge in a pre-atomic run). Idempotent; run
+    at the start of every drain. Returns how many jobs were repaired."""
+    repaired = 0
+    with _connect() as con:
+        rows = con.execute(
+            "SELECT bq.job_id, bq.ai_text, s.idx AS section_idx "
+            "FROM boost_queue bq JOIN sections s ON s.id=bq.section_id "
+            "WHERE bq.status='answered' AND bq.ai_text IS NOT NULL").fetchall()
+        for r in rows:
+            cur = con.execute("SELECT full_text FROM jobs WHERE id=?",
+                              (r["job_id"],)).fetchone()
+            if cur is None or f"\nsection {r['section_idx']}:" in (cur["full_text"] or ""):
+                continue
+            _merge_full_text(con, r["job_id"], r["section_idx"], r["ai_text"])
+            repaired += 1
+    return repaired
+
+
+def answered_boosts() -> list[dict]:
+    """Answered boost rows + job_dir/section_idx — lets the drain repair any
+    result.json file whose [AI Boost] block is missing (file mirror of
+    reconcile_boost_merges)."""
+    with _connect() as con:
+        rows = con.execute(
+            "SELECT bq.job_id, bq.ai_text, s.idx AS section_idx, j.job_dir "
+            "FROM boost_queue bq JOIN sections s ON s.id=bq.section_id "
+            "JOIN jobs j ON j.id=bq.job_id "
+            "WHERE bq.status='answered' AND bq.ai_text IS NOT NULL").fetchall()
+        return [dict(r) for r in rows]

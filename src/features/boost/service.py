@@ -66,6 +66,15 @@ def send_pending(settings: Settings, on_progress=lambda msg: None) -> BoostRunSu
 
 
 def _drain(settings: Settings, summary: "BoostRunSummary", on_progress) -> "BoostRunSummary":
+    # Crash recovery first: re-fold any answer that was saved to boost_queue but
+    # never merged into full_text / result.json (a pre-atomic run could die between
+    # the two). Runs even when nothing is pending, so a lost reading is repaired on
+    # the next drain regardless (v0.2.3).
+    repaired = store.reconcile_boost_merges()
+    _reconcile_result_files()
+    if repaired:
+        on_progress(f"Recovered {repaired} earlier AI reading(s) into the Raw Extract.")
+
     items = store.pending_boost_items()
     if not items:
         summary.stopped_reason = "Boost Queue is empty."
@@ -109,8 +118,10 @@ def _drain(settings: Settings, summary: "BoostRunSummary", on_progress) -> "Boos
             summary.errors.append(repr(exc))
             break
 
-        store.complete_boost(item["id"], item["section_id"], ai_text)
-        store.append_boost_to_job(item["job_id"], item["section_idx"], ai_text)
+        # Answer + section-boosted + full_text merge in ONE transaction so a crash
+        # can never leave the reading in boost_queue but absent from full_text.
+        store.complete_boost_atomic(item["id"], item["section_id"], item["job_id"],
+                                    item["section_idx"], ai_text)
         _update_result_json(item["job_dir"], item["section_idx"], ai_text)
         summary.answered += 1
 
@@ -124,7 +135,13 @@ def _is_auth_error(exc: Exception) -> bool:
 
 
 def _update_result_json(job_dir: str, section_idx: int, ai_text: str) -> None:
-    """Merge step 3: record the AI reading in the job folder's result.json."""
+    """Merge step 3: record the AI reading in the job folder's result.json —
+    idempotent per section so a reconcile/requeue never duplicates it.
+
+    Folds the reading BOTH into the `ai_boosts` array AND the human-readable
+    `full_text` (mirrors the DB) so the FILE is self-contained — before v0.2.2 the
+    corrected text lived ONLY in `ai_boosts`, so any view of full_text made those
+    sections look empty even though AI had read them (Nick)."""
     result_path = Path(job_dir) / "result.json"
     if not result_path.exists():
         return
@@ -132,22 +149,28 @@ def _update_result_json(job_dir: str, section_idx: int, ai_text: str) -> None:
         payload = json.loads(result_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
         return  # never let a corrupt file kill the boost run
+    changed = False
     boosts = payload.setdefault("ai_boosts", [])
-    boosts.append({"section_idx": section_idx, "ai_text": ai_text,
-                   "answered_at": datetime.now().isoformat(timespec="seconds")})
-    # Also fold the AI reading into the human-readable full_text — mirrors the DB
-    # (store.append_boost_to_job) so the FILE is self-contained. Before this the
-    # corrected text for unclear sections lived ONLY in the ai_boosts array, so
-    # opening result.json (or any view of full_text) made those sections look
-    # empty even though AI had read them (Nick, v0.2.2). Same labelled format as
-    # the DB; one [AI Boost] header, one line per section.
+    if not any(b.get("section_idx") == section_idx for b in boosts):
+        boosts.append({"section_idx": section_idx, "ai_text": ai_text,
+                       "answered_at": datetime.now().isoformat(timespec="seconds")})
+        changed = True
     ft = payload.get("full_text") or ""
-    if "[AI Boost]" not in ft:
-        ft += "\n\n[AI Boost]"
-    ft += f"\nsection {section_idx}: {ai_text}"
-    payload["full_text"] = ft
-    result_path.write_text(json.dumps(payload, ensure_ascii=False, indent=1),
-                           encoding="utf-8")
+    if f"\nsection {section_idx}:" not in ft:  # one [AI Boost] header, one line / section
+        if "[AI Boost]" not in ft:
+            ft += "\n\n[AI Boost]"
+        payload["full_text"] = ft + f"\nsection {section_idx}: {ai_text}"
+        changed = True
+    if changed:  # only rewrite when something was actually added (reconcile is cheap)
+        result_path.write_text(json.dumps(payload, ensure_ascii=False, indent=1),
+                               encoding="utf-8")
+
+
+def _reconcile_result_files() -> None:
+    """File mirror of store.reconcile_boost_merges: make sure every answered boost's
+    reading is present in its job's result.json too (idempotent, best-effort)."""
+    for r in store.answered_boosts():
+        _update_result_json(r["job_dir"], r["section_idx"], r["ai_text"])
 
 
 def _pacific_date() -> str:

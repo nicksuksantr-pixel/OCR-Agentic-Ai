@@ -88,6 +88,9 @@ class InboxWatcher:
             self.on_event(f"Inbox: ❌ {f.name} failed — {exc}")
             return
         self._move(f, paths.INBOX_PROCESSED)
+        if not results:  # 0-page / unreadable PDF — produced nothing, but is NOT a failure
+            self.on_event(f"Inbox: {f.name} produced no pages (empty or unreadable) — skipped.")
+            return
         jobs = ", ".join(str(r.job_id) for r in results)
         self.on_event(f"Inbox: ✅ {f.name} → job(s) {jobs} "
                       f"(confidence {results[-1].mean_conf}%)")

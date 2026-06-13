@@ -26,6 +26,7 @@ from pathlib import Path
 from src.core.config.settings import Settings
 from src.core.services import introduce, store
 from src.features.boost import service as boost_service
+from src.features.jobs import service as jobs_service
 from src.features.scan import service as scan_service
 
 
@@ -108,7 +109,9 @@ class ApiServer:
             if not job:
                 h._send(404, {"error": "job not found"})
                 return
-            result_path = Path(job["job_dir"]) / "result.json"
+            job_dir = jobs_service.resolve_job_dir(job)  # heal a moved/stale folder path
+            result_path = ((job_dir / "result.json") if job_dir
+                           else Path(job["job_dir"]) / "result.json")
             if not result_path.exists():
                 # No result.json (older error job) → return the DB record so the
                 # Heart still gets a machine-readable status instead of a 404.
@@ -148,6 +151,9 @@ class ApiServer:
                 return
             with self._scan_lock:
                 results = scan_service.run_source(source, self.settings)
+            if not results:  # 0-page / unreadable PDF: clean empty response, not a 500
+                h._send(200, {"jobs": [], "note": "no pages produced (empty or unreadable file)"})
+                return
             # Original single-job fields stay (contract); "jobs" is additive for PDFs.
             first = results[0]
             h._send(200, {"job_id": first.job_id,

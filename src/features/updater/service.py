@@ -189,15 +189,25 @@ class AutoUpdater:
         try:
             dest = Path(tempfile.gettempdir()) / "OCR-Agentic-Ai-update" / setup["name"]
             download(setup["browser_download_url"], dest)
-            if sha:
-                sha_file = dest.with_suffix(dest.suffix + ".sha256")
-                download(sha["browser_download_url"], sha_file)
-                expected = sha_file.read_text(encoding="utf-8").split()[0].lower()
-                if sha256_of(dest) != expected:
-                    dest.unlink(missing_ok=True)
-                    self.state = "error"
-                    self.on_event("Update download failed checksum — discarded.")
-                    return
+            if not sha:
+                # No .sha256 sibling on the release → refuse to stage. This binary is
+                # later run elevated and silent (/VERYSILENT) on exit, so installing
+                # it unverified would trust whatever the release serves. Every real
+                # release ships its checksum (build.ps1); a missing one is a pipeline
+                # slip or a tampered release — stop and require a manual update (v0.2.3).
+                dest.unlink(missing_ok=True)
+                self.state = "available"
+                self.on_event(f"Update {latest} has no checksum asset — not auto-installing; "
+                              "please update manually.")
+                return
+            sha_file = dest.with_suffix(dest.suffix + ".sha256")
+            download(sha["browser_download_url"], sha_file)
+            expected = sha_file.read_text(encoding="utf-8").split()[0].lower()
+            if sha256_of(dest) != expected:
+                dest.unlink(missing_ok=True)
+                self.state = "error"
+                self.on_event("Update download failed checksum — discarded.")
+                return
             self.staged_setup = dest
             self.staged_tag = latest
             self.state = "ready"
