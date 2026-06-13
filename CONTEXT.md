@@ -77,6 +77,7 @@ A desktop program that performs **maximum-detail OCR** on visual inputs (photos 
 ## Local API (v0.0.3 — the Heart's second door)
 
 - `http://127.0.0.1:8765` (port in Settings) — localhost only, never network-reachable. Endpoint contract documented in `src/features/api/service.py` docstring: `GET /health · /introduce · /jobs · /jobs/{id} · /jobs/{id}/result` and `POST /scan · /boost/run`. Changes to these payloads are breaking changes.
+- **Auth (v0.2.4):** POST routes (`/scan`, `/boost/run`) require a shared token in the `X-OCR-Token` header — 401 without it; GET routes stay open (CORS is never granted, so a browser page cannot read a GET response either; the gap was unauthenticated POST *actions* that spend Gemini quota). The token is generated once per Shared Store (`meta.api_token`) and published in `introduction.json` + `GET /introduce` under `interfaces.api.auth`. **Open-Claw must read it from the handshake and send it on every POST** — the requirement is a breaking change for POST callers (the token field itself is additive).
 
 ## Self-introduction (v0.0.4, Nick's request — the handshake)
 

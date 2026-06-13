@@ -12,6 +12,7 @@ from datetime import datetime
 
 from src.core.config import paths
 from src.core.config.settings import Settings
+from src.core.services import store
 
 INTRODUCTION_PATH = paths.DATA_DIR / "introduction.json"
 
@@ -57,14 +58,23 @@ def build_introduction(settings: Settings, version: str) -> dict:
             "api": {
                 "base_url": f"http://127.0.0.1:{settings.api_port}",
                 "enabled": settings.api_enabled,
+                "auth": {
+                    "scheme": "shared-token",
+                    "header": "X-OCR-Token",
+                    "token": store.api_token(),
+                    "required_on": "POST routes (/scan, /boost/run) — 401 without it",
+                    "open_routes": ("GET routes need no token; /health and /introduce "
+                                    "stay open so the Heart can bootstrap and read this token"),
+                    "note": "stable per store; send this header on every POST (v0.2.4)",
+                },
                 "endpoints": {
                     "GET /health": "liveness + version + pending boost count",
                     "GET /introduce": "this document",
                     "GET /jobs?limit=N": "newest jobs",
                     "GET /jobs/{id}": "one job + its sections",
                     "GET /jobs/{id}/result": "full Raw Extract (result.json)",
-                    "POST /scan {\"path\": \"<image or pdf>\"}": "scan synchronously, returns job summary (+jobs list, one per PDF page)",
-                    "POST /boost/run": "drain the AI Boost queue now",
+                    "POST /scan {\"path\": \"<image or pdf>\"}": "scan synchronously, returns job summary (+jobs list, one per PDF page) — requires X-OCR-Token",
+                    "POST /boost/run": "drain the AI Boost queue now — requires X-OCR-Token",
                 },
             },
         },

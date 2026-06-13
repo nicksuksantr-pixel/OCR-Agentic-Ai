@@ -16,7 +16,12 @@ Endpoints (the contract — changes are breaking, note them in V-Log):
                                 Add "async": true to return 202 at once and poll
                                 /jobs + /jobs/{id}/result (v0.2.2, additive)
   POST /boost/run             → drain the Boost Queue now; returns the run summary
+
+Auth (v0.2.4): POST routes require header `X-OCR-Token: <token>` (read it from
+GET /introduce or data/introduction.json); 401 otherwise. GET routes are open,
+and CORS is never granted so a browser page cannot read a GET response either.
 """
+import hmac
 import json
 import threading
 from dataclasses import asdict
@@ -125,8 +130,14 @@ class ApiServer:
             h._send(404, {"error": "unknown endpoint"})
 
     def _route_post(self, h) -> None:
-        parts = [p for p in h.path.split("/") if p]
         length = int(h.headers.get("Content-Length") or 0)
+        if not _authorized(h):
+            if length:
+                h.rfile.read(length)  # drain the body so the socket stays usable
+            h._send(401, {"error": "missing or invalid X-OCR-Token header — read the "
+                                   "token from GET /introduce or data/introduction.json"})
+            return
+        parts = [p for p in h.path.split("/") if p]
         body = json.loads(h.rfile.read(length) or b"{}") if length else {}
 
         if parts == ["scan"]:
@@ -168,6 +179,14 @@ class ApiServer:
             h._send(200, asdict(summary))
         else:
             h._send(404, {"error": "unknown endpoint"})
+
+
+def _authorized(h) -> bool:
+    """True when the request carries the correct shared token. Constant-time
+    compare so the token can't be recovered through response timing."""
+    expected = store.api_token()
+    given = h.headers.get("X-OCR-Token", "")
+    return bool(expected) and hmac.compare_digest(given, expected)
 
 
 def _query_int(query: str, key: str, default: int) -> int:

@@ -13,17 +13,20 @@ sys.stdout.reconfigure(encoding="utf-8")
 
 from src.core.config import paths
 from src.core.config import settings as settings_mod
-from src.core.services import engine
+from src.core.services import engine, store
 from src.features.api.service import ApiServer
 
 TEST_PORT = 18765  # off the default so a running GUI never collides
 
 
-def call(method: str, route: str, body: dict | None = None):
+def call(method: str, route: str, body: dict | None = None, token: str | None = None):
+    headers = {"Content-Type": "application/json"}
+    if token:
+        headers["X-OCR-Token"] = token
     req = urllib.request.Request(
         f"http://127.0.0.1:{TEST_PORT}{route}", method=method,
         data=json.dumps(body).encode() if body else None,
-        headers={"Content-Type": "application/json"})
+        headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=120) as resp:
             return resp.status, json.loads(resp.read().decode("utf-8"))
@@ -46,6 +49,8 @@ def main() -> None:
         print("API ERROR:", err)
         sys.exit(1)
 
+    token = store.api_token()  # POST routes require it (v0.2.4)
+
     code, health = call("GET", "/health")
     print("health:", code, health)
 
@@ -60,10 +65,11 @@ def main() -> None:
     code_detail, detail = call("GET", f"/jobs/{job_id}") if job_id else (0, {})
     code_result, _ = call("GET", f"/jobs/{job_id}/result") if job_id else (0, {})
     code_404, _ = call("GET", "/jobs/999999")
-    code_bad, _ = call("POST", "/scan", {"path": "no_such_file.png"})
+    code_unauth, _ = call("POST", "/boost/run")  # no token → must be 401
+    code_bad, _ = call("POST", "/scan", {"path": "no_such_file.png"}, token=token)
 
     test_img = paths.DATA_DIR / "smoke_test.png"
-    code_scan, scan = (call("POST", "/scan", {"path": str(test_img)})
+    code_scan, scan = (call("POST", "/scan", {"path": str(test_img)}, token=token)
                        if test_img.exists() else (0, {}))
     print("scan:", code_scan, {k: scan.get(k) for k in ("job_id", "mean_conf", "queued_sections")})
 
@@ -75,7 +81,7 @@ def main() -> None:
                 "ai_text = '(cleared by smoke_api — never sent)' WHERE status = 'pending'")
     con.commit()
     con.close()
-    code_boost, boost = call("POST", "/boost/run")
+    code_boost, boost = call("POST", "/boost/run", token=token)
     print("boost/run:", code_boost, boost.get("stopped_reason") or boost)
 
     api.stop()
@@ -86,6 +92,7 @@ def main() -> None:
         "jobs list": code == 200,
         "job detail + result": code_detail == 200 and code_result == 200,
         "404 on missing job": code_404 == 404,
+        "401 on POST without token": code_unauth == 401,
         "400 on bad scan body": code_bad == 400,
         "scan via API works": code_scan == 200 and scan.get("job_id"),
         "boost/run responds": code_boost == 200,

@@ -136,6 +136,24 @@ def get_meta(key: str) -> str | None:
         return row["value"] if row else None
 
 
+def api_token() -> str:
+    """Get-or-create the local-API shared token (v0.2.3 audit fix, shipped v0.2.4).
+
+    Persisted in the meta table so it is stable across restarts. Open-Claw reads
+    it from GET /introduce (or data/introduction.json) and sends it as the
+    X-OCR-Token header on POST routes; without it POST /scan and POST /boost/run
+    return 401, so a stray local process or a browser localhost-fetch can no
+    longer drive scans or spend the Gemini quota. Race-safe: INSERT OR IGNORE
+    means two threads bootstrapping at once still converge on one token."""
+    token = get_meta("api_token")
+    if token:
+        return token
+    with _connect() as con:
+        con.execute("INSERT OR IGNORE INTO meta (key, value) VALUES ('api_token', ?)",
+                    (uuid.uuid4().hex,))
+    return get_meta("api_token")
+
+
 def create_job(source_path: str, job_dir: str, languages: str) -> int:
     """Insert a new Job row and return its id.
 
