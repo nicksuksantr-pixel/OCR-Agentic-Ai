@@ -104,7 +104,7 @@
 ### settings
 - `src/features/settings/view.py`
     • `class SettingsView` — The Settings tab: AI Boost + OCR engine + interfaces + updates + queue.
-        ↳ refresh_queue
+        ↳ refresh_update_status, refresh_queue
 
 ### tray
 - `src/features/tray/service.py`

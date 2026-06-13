@@ -44,12 +44,14 @@ class SettingsView(ctk.CTkFrame):
     """The Settings tab: AI Boost + OCR engine + interfaces + updates + queue."""
 
     def __init__(self, master, settings: Settings, boost: BoostController,
-                 on_saved=None):
+                 on_saved=None, on_install_update=None, app_version=""):
         super().__init__(master, fg_color="transparent")
         self.settings = settings
         self.boost = boost
-        self.on_saved = on_saved   # App hook — refresh Scan-tab banners after a save
-        self.updater = None        # attached by the App after construction
+        self.on_saved = on_saved                 # App hook — refresh Scan-tab banners after a save
+        self.on_install_update = on_install_update  # App hook — install the staged update now
+        self.app_version = app_version
+        self.updater = None                      # attached by the App after construction
 
         body = ctk.CTkScrollableFrame(self, fg_color="transparent")
         body.pack(fill="both", expand=True)
@@ -61,6 +63,7 @@ class SettingsView(ctk.CTkFrame):
         self._build_queue(body)
         self._apply_paid_state()
         self.refresh_queue()
+        self._update_status_tick()
 
     # --- sections -------------------------------------------------------------
 
@@ -150,8 +153,21 @@ class SettingsView(ctk.CTkFrame):
 
     def _build_updates(self, parent) -> None:
         box = self._section(parent, "🔄 Updates")
+        ctk.CTkLabel(box, text=f"Installed version: {self.app_version}",
+                     anchor="w").pack(fill="x", padx=theme.M)
+        # Live status + the explicit install button (Nick: "no status, no button").
+        status_row = ctk.CTkFrame(box, fg_color="transparent")
+        status_row.pack(fill="x", padx=theme.M, pady=theme.XS)
+        self.update_status = ctk.CTkLabel(status_row, text="—", anchor="w",
+                                          text_color=theme.MUTED)
+        self.update_status.pack(side="left", fill="x", expand=True)
+        self.install_btn = ctk.CTkButton(status_row, text="⬇ Install & restart now", width=170,
+                                         state="disabled", command=self._install_now,
+                                         **theme.primary_btn())
+        self.install_btn.pack(side="right")
         self.auto_update_var = ctk.BooleanVar(value=self.settings.auto_update)
-        ctk.CTkSwitch(box, text="Auto-update (checks every start, installs silently on quit)",
+        ctk.CTkSwitch(box, text="Auto-update (checks on start + every few hours; "
+                               "shows a bar when a new version is ready)",
                       variable=self.auto_update_var).pack(anchor="w", padx=theme.M, pady=theme.XS)
         row = ctk.CTkFrame(box, fg_color="transparent")
         row.pack(fill="x", padx=theme.M, pady=(theme.XS, theme.M))
@@ -163,6 +179,40 @@ class SettingsView(ctk.CTkFrame):
             self.repo_entry.insert(0, self.settings.update_repo)
         ctk.CTkButton(row, text="🔄 Check now", width=110, command=self._check_updates,
                       **theme.ghost_btn()).grid(row=0, column=2)
+
+    _STATE_TEXT = {
+        "disabled": ("Updater is off — enable Auto-update below.", theme.MUTED),
+        "idle": ("", theme.MUTED),
+        "checking": ("🔄 Checking for updates...", theme.MUTED),
+        "uptodate": ("✅ You are on the latest version.", theme.SUCCESS),
+        "available": ("A newer version is available (run the installer to update).", theme.WARN),
+        "downloading": ("⬇ Downloading the update...", theme.MUTED),
+        "ready": ("✅ Update ready — click 'Install & restart now'.", theme.SUCCESS),
+        "error": ("⚠ Update check failed (offline or repo unreachable).", theme.WARN),
+    }
+
+    def refresh_update_status(self) -> None:
+        """Reflect the updater's current state in the label + install button."""
+        if not hasattr(self, "update_status"):
+            return
+        state = getattr(self.updater, "state", "idle") if self.updater else "idle"
+        text, color = self._STATE_TEXT.get(state, ("", theme.MUTED))
+        if state == "downloading" and self.updater and self.updater.latest_tag:
+            text = f"⬇ Downloading {self.updater.latest_tag}..."
+        if state == "ready" and self.updater and self.updater.staged_tag:
+            text = f"✅ Update {self.updater.staged_tag} ready — click 'Install & restart now'."
+        self.update_status.configure(text=text or "—", text_color=color)
+        self.install_btn.configure(state="normal" if state == "ready" else "disabled")
+
+    def _update_status_tick(self) -> None:
+        if not self.winfo_exists():
+            return
+        self.refresh_update_status()
+        self.after(2000, self._update_status_tick)
+
+    def _install_now(self) -> None:
+        if self.on_install_update:
+            self.on_install_update()
 
     def _build_queue(self, parent) -> None:
         box = self._section(parent, "📤 Boost Queue")
@@ -207,10 +257,11 @@ class SettingsView(ctk.CTkFrame):
 
     def _check_updates(self) -> None:
         if self.updater is None:
-            self.run_status.configure(text="Updater not ready yet — try again in a moment.")
+            self.update_status.configure(text="Updater not ready yet — try again.",
+                                         text_color=theme.MUTED)
             return
-        self.run_status.configure(text="🔄 Checking for updates — see the Activity log.")
         self.updater.check_async(manual=True)
+        self.refresh_update_status()
 
     def _toggle_paid(self) -> None:
         if self.paid_var.get() and not messagebox.askyesno(

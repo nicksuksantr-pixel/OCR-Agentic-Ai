@@ -5,7 +5,7 @@
 ## Stack & version
 
 - Python 3.13 + CustomTkinter 5.2.2 · Tesseract OCR (local, offline, tha+eng) · SQLite
-- Current version: **v0.2.0** (3-place versioning per Nick, 2026-06-12) · releases: [github.com/nicksuksantr-pixel/OCR-Agentic-Ai](https://github.com/nicksuksantr-pixel/OCR-Agentic-Ai/releases)
+- Current version: **v0.2.1** (3-place versioning per Nick, 2026-06-12) · releases: [github.com/nicksuksantr-pixel/OCR-Agentic-Ai](https://github.com/nicksuksantr-pixel/OCR-Agentic-Ai/releases)
 - Gemini AI Boost: AI Studio key in `.env` (`GEMINI_API_KEY=...`), default model `gemini-3.1-flash-lite`, free-tier throttled (15 RPM / 500 RPD)
 
 ## Run / build
@@ -45,7 +45,7 @@
 - **Local API for Open-Claw** — `http://127.0.0.1:8765`: `GET /health · /introduce · /jobs · /jobs/{id} · /jobs/{id}/result`, `POST /scan · /boost/run`. Localhost only.
 - **Self-introduction (handshake)** — `data\introduction.json` (refreshed every start) + `GET /introduce`: identity, Shared Store paths/schema, interfaces and conventions in one machine-readable document — Open-Claw self-configures from one read.
 - **Tray mode** — closing the window hides the app to the system tray; watcher + API keep serving Open-Claw. Tray menu: Open / Quit. Single-instance (mutex).
-- **Silent auto-update** — GitHub-Releases check on every app start + "Check now" button (Settings → Updates: repo + toggle); a newer Setup is downloaded, SHA-256-verified, and installs silently when the app exits, then relaunches. One UAC popup per update (Program Files — Windows requirement).
+- **Auto-update (visible + one-click, v0.2.1)** — GitHub-Releases check on every start **and every 6 h** (so a tray-resident app still updates). When a newer Setup is downloaded and SHA-256-verified, a **prominent update bar** appears across the top — "🔄 Update vX ready" + **[⬇ Install & restart now]** + [Later]; Settings → Updates shows the installed version + a live status + the same Install button. Clicking it installs immediately and relaunches (no manual Quit). One UAC popup per update (Program Files — Windows requirement).
 - **Data location** — ONE Shared Store for both dev and installed runs: `%LOCALAPPDATA%\OCR-Agentic-Ai\` (`OCR_AGENTIC_DATA_DIR` overrides — tests use a throwaway store). Before v0.2.0 dev and installed diverged, which made "open folder" land on the wrong tree and deleted jobs seem to reappear; the legacy `<project>\data` store is migrated once on first run.
 - **Branding** — icon (scanning eye) = identity: taskbar/installer/shortcuts. Mascot "Scout" (one-eyed scanner robot, `assets\mascot.png`) = helper: Scan tab + installer wizard pages. Never swap roles (#3). Regenerate: `build\make_icon.py` / `build\make_mascot.py`.
 

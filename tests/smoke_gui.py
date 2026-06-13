@@ -61,6 +61,16 @@ def main() -> None:
         b.cget("state") == "normal" for b in app.jobs_view._actions)
     store.delete_job(job_id)
 
+    # --- update bar hidden until ready, then shows with the tag ---
+    checks["update bar hidden initially"] = not app.update_bar.winfo_ismapped()
+    app.updater.staged_tag = "v9.9.9"
+    app._update_ready("v9.9.9")
+    app.update()
+    checks["update bar shows when ready"] = (app.update_bar.winfo_ismapped()
+                                             and "v9.9.9" in app.update_label.cget("text"))
+    checks["settings update hook wired"] = (app.settings_view.on_install_update
+                                            == app._install_update_now)
+
     app.destroy()
 
     failed = [n for n, ok in checks.items() if not ok]

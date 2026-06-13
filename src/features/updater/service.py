@@ -120,12 +120,18 @@ class AutoUpdater:
     """Owns the staged update state; App calls check_async() at start and
     apply_on_exit() inside its quit path."""
 
-    def __init__(self, settings: Settings, version: str, on_event=lambda msg: None):
+    def __init__(self, settings: Settings, version: str, on_event=lambda msg: None,
+                 on_ready=lambda tag: None):
         self.settings = settings
         self.version = version
         self.on_event = on_event
+        self.on_ready = on_ready               # fired (with the tag) when an update is staged
         self.staged_setup: Path | None = None  # downloaded+verified, installs on exit
         self.staged_tag: str | None = None     # the tag that setup carries
+        self.latest_tag: str | None = None     # newest tag the channel offers
+        # UI-readable state: disabled | idle | checking | uptodate | available
+        #                  | downloading | ready | error
+        self.state: str = "idle"
 
     # --- checking ------------------------------------------------------------
 
@@ -133,23 +139,31 @@ class AutoUpdater:
         """Check the release channel in the background. `manual` (the Settings
         "Check now" button) also reports the no-update/disabled outcomes."""
         if not (self.settings.auto_update and self.settings.update_repo.strip()):
+            self.state = "disabled"
             if manual:
                 self.on_event("Updater is disabled (Settings → Updates).")
             return
+        if self.state == "ready":  # already have one waiting — re-announce, don't re-fetch
+            self.on_ready(self.staged_tag)
+            return
+        self.state = "checking"
+        if manual:
+            self.on_event("Checking for updates...")
         threading.Thread(target=self._check, args=(manual,), daemon=True,
                          name="update-check").start()
 
     def _check(self, manual: bool) -> None:
         if self.staged_setup:
-            if manual:
-                self.on_event("Update already staged — installs when you quit.")
+            self.state = "ready"
+            self.on_ready(self.staged_tag)
             return
         release = fetch_latest_release(self.settings.update_repo.strip())
         if not release:
-            if manual:
-                self.on_event("Update check failed — offline or repo unreachable.")
+            self.state = "error"
+            self.on_event("Update check failed — offline or repo unreachable.")
             return
         latest = release.get("tag_name", "")
+        self.latest_tag = latest
         # Skip anything not strictly newer than BOTH the running build and the
         # last tag we already installed — a release that equals what we've
         # installed is never re-downloaded, even if the frozen exe's reported
@@ -159,16 +173,19 @@ class AutoUpdater:
         if applied:
             floor = max(floor, parse_version(applied))
         if parse_version(latest) <= floor:
-            if manual:
-                self.on_event(f"Up to date ({self.version} is the latest).")
+            self.state = "uptodate"
+            self.on_event(f"Up to date ({self.version} is the latest).")
             return
         setup, sha = pick_assets(release)
         if not setup:
+            self.state = "error"
             return
-        self.on_event(f"Update {latest} found — downloading in background...")
         if not getattr(sys, "frozen", False):
+            self.state = "available"
             self.on_event(f"Update {latest} available (dev run — install skipped).")
             return
+        self.state = "downloading"
+        self.on_event(f"Update {latest} found — downloading...")
         try:
             dest = Path(tempfile.gettempdir()) / "OCR-Agentic-Ai-update" / setup["name"]
             download(setup["browser_download_url"], dest)
@@ -178,12 +195,16 @@ class AutoUpdater:
                 expected = sha_file.read_text(encoding="utf-8").split()[0].lower()
                 if sha256_of(dest) != expected:
                     dest.unlink(missing_ok=True)
+                    self.state = "error"
                     self.on_event("Update download failed checksum — discarded.")
                     return
             self.staged_setup = dest
             self.staged_tag = latest
-            self.on_event(f"Update {latest} ready — installs silently when you quit.")
+            self.state = "ready"
+            self.on_event(f"Update {latest} is ready to install.")
+            self.on_ready(latest)
         except Exception as exc:
+            self.state = "error"
             self.on_event(f"Update download failed: {exc}")
 
     # --- applying ------------------------------------------------------------
