@@ -3,6 +3,9 @@
 > Source of truth: OCR-Agentic-Ai (the eyes). Open-Claw must adopt the change
 > below or its POST calls will start failing. Created 2026-06-14 (eyes v0.2.4/0.2.5).
 > Per project rule #1 we never edit Open-Claw — Nick carries this note over.
+>
+> ✅ **ADOPTED 2026-06-15** — Nick relayed this to Open-Claw; they now send
+> `X-OCR-Token` on POST and the integration is confirmed working. Kept for history.
 
 ## 🔴 BREAKING (eyes v0.2.4) — the local API now requires a token on POST
 
