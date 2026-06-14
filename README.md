@@ -5,7 +5,7 @@
 ## Stack & version
 
 - Python 3.13 + CustomTkinter 5.2.2 · Tesseract OCR (local, offline, tha+eng) · SQLite
-- Current version: **v0.2.6** (3-place versioning per Nick, 2026-06-12) · releases: [github.com/nicksuksantr-pixel/OCR-Agentic-Ai](https://github.com/nicksuksantr-pixel/OCR-Agentic-Ai/releases)
+- Current version: **v0.2.9** (3-place versioning per Nick, 2026-06-12) · releases: [github.com/nicksuksantr-pixel/OCR-Agentic-Ai](https://github.com/nicksuksantr-pixel/OCR-Agentic-Ai/releases)
 - Gemini AI Boost: AI Studio key in `.env` (`GEMINI_API_KEY=...`), default model `gemini-3.1-flash-lite`, free-tier throttled (15 RPM / 500 RPD)
 
 ## Run / build
@@ -33,7 +33,7 @@
 
 ## Features
 
-- **Scan (deep-detail)** — pick an image or PDF → preprocess (upscale to ≥2000 px) → dual full pass (block + sparse) + overlapping Sectioned Scan (3× zoom, dual pass per tile, grid auto-scales up to 7×7 and covers only the **content bounding box**, not the paper margin; tiles holding only frame/border lines are never queued or saved) → stitched Raw Extract (text + positions + confidence). A PDF becomes one Job per page (rendered at 400 DPI via pypdfium2; source recorded as `path#page=N`). Deliberately slow and thorough (Nick's order, v0.0.8).
+- **Scan (deep-detail)** — pick an image or PDF → preprocess (upscale to ≥2000 px) → dual full pass (block + sparse) + overlapping Sectioned Scan (3× zoom, dual pass per tile, grid auto-scales up to 7×7 over the **whole inked sheet** — no pre-scan frame crop, so edge content like a left title-block strip is never dropped, v0.2.9; a **staggered offset second grid** then reads anything the main grid's cuts split, with full surrounding context — Nick's blue+red dual grid; tiles holding only frame/border lines are never queued or saved) → stitched Raw Extract (text + positions + confidence). A PDF becomes one Job per page (rendered at 400 DPI via pypdfium2; source recorded as `path#page=N`). Deliberately slow and thorough (Nick's order, v0.0.8).
 - **Self-rescue (deep merge)** — sections below the quality bar (`rescue_trigger_conf` 75) run ALL local variants and merge the union: 4× zoom → Otsu binarize → sparse mode → inversion (white-on-black) → 90°/270° rotation (vertical labels). Below `low_conf_threshold` 60 they still queue for AI Boost. Rescued sections carry `rescued`/`rescue_method` in result.json.
 - **Live page streaming** — multi-page PDFs show each page's result the moment it finishes (Scan tab streams, Jobs list refreshes live); scans can be **paused/resumed/cancelled** mid-batch (finished pages are kept). Re-picking a partially scanned PDF offers **batch resume** (skips finished pages); jobs orphaned by an app exit are auto-marked on next start.
 - **Auto language detect** — pages with no real Thai text re-run English-only, eliminating Thai-glyph hallucination on line drawings (`auto_language` setting, default on; `languages_used` recorded in result.json).

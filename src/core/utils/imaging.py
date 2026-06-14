@@ -79,39 +79,13 @@ def _profile(img: Image.Image, axis: int) -> list[float]:
     return [v / 255.0 for v in line.getdata()]
 
 
-def frame_interior(img: Image.Image, margin_pct: float = 0.15,
-                   line_cover: float = 0.55) -> tuple[int, int, int, int]:
-    """Interior (x0, y0, x1, y1) of a drawing's border frame.
-
-    Technical sheets carry a rectangular frame with zone-letter strips (A/B/C..,
-    1/2/3..) around the edge; tiling those gives the useless border crops Nick
-    flagged. A frame line = a row/col whose ink covers most of the page within
-    the outer margin band. The INNERMOST such line on each side bounds the
-    content. Sides without a frame line fall back to the content bbox.
-    """
-    cols = _profile(img, 0)
-    rows = _profile(img, 1)
-    w, h = img.width, img.height
-    bx0, by0, bx1, by1 = content_bbox(img)
-    mx, my = round(w * margin_pct), round(h * margin_pct)
-    inset = max(2, round(min(w, h) * 0.004))  # step inside the line itself
-
-    def innermost(profile, span, limit, from_end):
-        idxs = range(span - 1, span - limit - 1, -1) if from_end else range(limit)
-        hits = [i for i in idxs if profile[i] >= line_cover]
-        return (min(hits) - inset if from_end else max(hits) + inset) if hits else None
-
-    x0 = innermost(cols, w, mx, False)
-    x1 = innermost(cols, w, mx, True)
-    y0 = innermost(rows, h, my, False)
-    y1 = innermost(rows, h, my, True)
-    x0 = bx0 if x0 is None else max(x0, 0)
-    y0 = by0 if y0 is None else max(y0, 0)
-    x1 = bx1 if x1 is None else min(x1, w)
-    y1 = by1 if y1 is None else min(y1, h)
-    if x1 - x0 < w * 0.3 or y1 - y0 < h * 0.3:  # implausible frame → trust the ink bbox
-        return (bx0, by0, bx1, by1)
-    return (x0, y0, x1, y1)
+# NOTE: frame_interior() was removed in v0.2.9. It cropped the grid to the
+# innermost border line, which ate real edge content (the left vertical
+# title-block strip on the Cummins CIB sheet was 643 px / 8.2% of the page —
+# all dropped before scanning). The pipeline now tiles the whole inked area
+# (content_bbox); empty border/zone tiles are skipped by the blank / ruled-only
+# / line-only filters instead, so the border is never *queued* but never *lost*.
+# Nick: "don't crop the document before scanning."
 
 
 def smart_cuts(profile: list[float], n_tiles: int,
@@ -138,7 +112,7 @@ def smart_grid(img: Image.Image, interior: tuple[int, int, int, int],
     """Content-aware Sectioned-Scan grid inside the frame interior.
 
     Returns (boxes [x,y,w,h] row-major, x_cuts, y_cuts) — cuts are absolute
-    coordinates, used afterwards for the seam-strip pass.
+    coordinates, used afterwards to build the staggered offset grid.
     """
     x0, y0, x1, y1 = interior
     region = img.crop(interior)
@@ -157,23 +131,41 @@ def smart_grid(img: Image.Image, interior: tuple[int, int, int, int],
     return boxes, xs[1:-1], ys[1:-1]
 
 
-def seam_strips(interior: tuple[int, int, int, int], x_cuts: list[int],
-                y_cuts: list[int], strip_pct: float = 0.4,
-                min_px: int = 300) -> list[tuple[int, int, int, int]]:
-    """Strips [x,y,w,h] centred on every internal grid cut — scanned as an
-    extra pass so text sitting exactly on a tile seam is read whole (Nick:
-    "สแกนระหว่างรอยต่อด้วยจะได้แม่นขึ้น"). Wide enough that a label crossing
-    the cut fits inside the strip with room on both sides."""
+def offset_grid(interior: tuple[int, int, int, int], x_cuts: list[int],
+                y_cuts: list[int], overlap_pct: float
+                ) -> list[tuple[int, int, int, int]]:
+    """A SECOND Sectioned-Scan grid, staggered half a tile from the main grid so
+    every main-grid cut falls in the MIDDLE of an offset tile — and every
+    offset-grid cut falls in the middle of a main tile. Between the two grids no
+    label is ever permanently split by a cut: whatever the main grid slices, the
+    offset grid reads whole with full surrounding context (Nick's red/blue
+    dual-grid idea, v0.2.9: "เอาแดงกับน้ำเงินมารวมแล้วกรอง"). A full offset tile
+    beats a thin seam strip, so this replaces the old seam-strip pass.
+
+    The offset boundaries are the MAIN grid's tile centres
+    (x0, centre_0, centre_1, ..., x1): each interior main-grid cut then sits at a
+    boundary midpoint here = the centre of an offset tile, full height/width
+    covered because the offset rows/cols also span the whole interior. Returns
+    boxes [x,y,w,h] row-major — word-harvest only, no sections."""
     x0, y0, x1, y1 = interior
-    n_cols, n_rows = len(x_cuts) + 1, len(y_cuts) + 1
-    pitch_x, pitch_y = (x1 - x0) / n_cols, (y1 - y0) / n_rows
-    sw = round(min(0.6 * pitch_x, max(min_px, pitch_x * strip_pct)))
-    sh = round(min(0.6 * pitch_y, max(min_px, pitch_y * strip_pct)))
-    strips = [(max(x0, cut - sw // 2), y0,
-               min(sw, x1 - max(x0, cut - sw // 2)), y1 - y0) for cut in x_cuts]
-    strips += [(x0, max(y0, cut - sh // 2),
-                x1 - x0, min(sh, y1 - max(y0, cut - sh // 2))) for cut in y_cuts]
-    return strips
+    ax = [x0] + list(x_cuts) + [x1]
+    ay = [y0] + list(y_cuts) + [y1]
+    cx = [round((ax[i] + ax[i + 1]) / 2) for i in range(len(ax) - 1)]  # main x tile centres
+    cy = [round((ay[i] + ay[i + 1]) / 2) for i in range(len(ay) - 1)]  # main y tile centres
+    bx = [x0] + cx + [x1]
+    by = [y0] + cy + [y1]
+    ox = (x1 - x0) / max(len(x_cuts) + 1, 1) * overlap_pct
+    oy = (y1 - y0) / max(len(y_cuts) + 1, 1) * overlap_pct
+    boxes = []
+    for r in range(len(by) - 1):
+        for c in range(len(bx) - 1):
+            bx0 = max(x0, round(bx[c] - ox))
+            by0 = max(y0, round(by[r] - oy))
+            bx1 = min(x1, round(bx[c + 1] + ox))
+            by1 = min(y1, round(by[r + 1] + oy))
+            if bx1 - bx0 > 1 and by1 - by0 > 1:  # drop slivers
+                boxes.append((bx0, by0, bx1 - bx0, by1 - by0))
+    return boxes
 
 
 def ruled_only(img: Image.Image, line_cover: float = 0.6,

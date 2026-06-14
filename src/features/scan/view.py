@@ -23,7 +23,8 @@ PREVIEW_W = 440          # live-preview pane width (px)
 PREVIEW_H = 560          # height cap so a tall page never overflows a short window
 PREVIEW_HINT = "📄 A live preview of the page appears here while scanning,\n" \
                "with the section being read highlighted."
-HILITE = (61, 125, 255)  # theme.PRIMARY (#3d7dff) as RGB — the live section box
+HILITE = (61, 125, 255)  # theme.PRIMARY (#3d7dff) as RGB — the main-grid section box
+OFFSET_HILITE = (230, 70, 70)  # red — the staggered offset grid (Nick's blue+red dual grid)
 
 
 class ScanView(ctk.CTkFrame):
@@ -248,6 +249,8 @@ class ScanView(ctk.CTkFrame):
         elif kind == "section":
             self._highlight_section(e)
             self._set_scan_progress(e)
+        elif kind == "offset":
+            self._highlight_offset(e)
         elif kind == "section_text":
             self._add_live_text(e)
 
@@ -280,6 +283,19 @@ class ScanView(ctk.CTkFrame):
         im = self._preview_base.convert("RGB")  # returns a copy — base stays clean
         ImageDraw.Draw(im).rectangle(
             [bx * sx, by * sy, (bx + bw) * sx, (by + bh) * sy], outline=HILITE, width=3)
+        self._show_preview(im)
+
+    def _highlight_offset(self, e: dict) -> None:
+        """Draw the offset-grid tile currently being read, in red — so the
+        staggered second pass is visibly distinct from the blue main grid (Nick's
+        blue+red dual grid; the cut it straddles sat between two blue boxes)."""
+        if self._preview_base is None:
+            return
+        bx, by, bw, bh = e.get("bbox", (0, 0, 0, 0))
+        sx, sy = self._pscale
+        im = self._preview_base.convert("RGB")  # returns a copy — base stays clean
+        ImageDraw.Draw(im).rectangle(
+            [bx * sx, by * sy, (bx + bw) * sx, (by + bh) * sy], outline=OFFSET_HILITE, width=3)
         self._show_preview(im)
 
     def _set_scan_progress(self, e: dict) -> None:

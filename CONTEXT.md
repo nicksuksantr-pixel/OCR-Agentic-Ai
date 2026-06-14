@@ -23,6 +23,7 @@ A desktop program that performs **maximum-detail OCR** on visual inputs (photos 
 ### Sectioned Scan (Nick's core idea)
 - **Means:** splitting one Source image into overlapping sections (e.g. a 3×3 grid), scanning each section at high resolution separately, then stitching the per-section results back into one Raw Extract — because whole-image OCR misses small/dense text.
 - **Example:** a drawing split into a grid; tiny pin labels readable only when each tile is scanned zoomed-in.
+- **Coverage (v0.2.9):** the **whole inked sheet** is tiled — there is **no pre-scan crop**, so edge content (e.g. a left title-block strip, terminal-number columns, border NOTES) is never dropped before scanning; empty border/zone tiles are filtered out of the AI queue instead, not cropped away. A **staggered offset second grid** (shifted half a tile) reads any label the main grid's cuts split, whole and with full surrounding context — Nick's blue+red dual grid; it replaces the older thin seam-strip pass. This only ADDS confidence-filtered, de-duplicated reads — never loses or duplicates one. (Not a schema change: more complete `words`/`full_text`, same fields.)
 
 ### Hybrid mode (decided 2026-06-12)
 - **Means:** local OCR is ALWAYS the primary pass and must work fully offline; Gemini Vision is a booster used only on unclear sections, only when internet is available, and within free-tier limits. Local + AI results for the same section are merged into the final Raw Extract.

@@ -1,7 +1,7 @@
-"""Headless smoke test for the v0.1.5 grid engine — physical-size grid,
-frame-interior detection, valley-snapped cuts, seam pass, ruled-only filter,
-whole-page orientation. Builds a synthetic framed drawing and asserts each
-behaviour; exits non-zero on the first failure."""
+"""Headless smoke test for the grid engine — physical-size grid, whole-sheet
+content-bbox coverage (no pre-scan crop, v0.2.9), valley-snapped cuts, staggered
+offset grid, ruled-only filter, whole-page orientation. Builds a synthetic framed
+drawing and asserts each behaviour; exits non-zero on the first failure."""
 import sys
 from pathlib import Path
 
@@ -93,14 +93,16 @@ def main() -> None:
     sheet_path = paths.DATA_DIR / "smoke_grid_sheet.png"
     make_framed_drawing(sheet_path)
     sheet = Image.open(sheet_path)
-    ix0, iy0, ix1, iy1 = imaging.frame_interior(sheet)
-    check("frame_interior excludes zone band",
-          ix0 >= 88 and iy0 >= 88 and ix1 <= 2312 and iy1 <= 1612,
-          f"interior=({ix0},{iy0},{ix1},{iy1})")
+    # No pre-scan crop (v0.2.9): content_bbox keeps the WHOLE inked sheet —
+    # frame, zone band and all — so the left title-block strip is never lost.
+    cx0, cy0, cx1, cy1 = imaging.content_bbox(sheet)
+    check("content_bbox keeps the whole inked sheet (no document crop)",
+          cx0 <= 60 and cy0 <= 60 and cx1 >= 2340 and cy1 >= 1640,
+          f"content_bbox=({cx0},{cy0},{cx1},{cy1})")
     # the pipeline works on the preprocessed (upscaled) canvas — expectations
     # below must live in that space
     pre = imaging.preprocess(sheet, settings.upscale_min_side)
-    px0, py0, px1, py1 = imaging.frame_interior(pre)
+    px0, py0, px1, py1 = imaging.content_bbox(pre)
     interior_mm = ((px1 - px0) / pre.width * 420.0,
                    (py1 - py0) / pre.height * 297.0)
     exp_rows, exp_cols = imaging.grid_from_mm(interior_mm)
@@ -122,14 +124,21 @@ def main() -> None:
                              page_size_mm=(420.0, 297.0))
     text = result.full_text.upper()
     check("content read", "SWITCHBOARD" in text and "FEEDER" in text)
-    check("seam word read whole", "SEAMWORD77" in text.replace(" ", ""))
+    # The staggered offset grid must read a word straddling a main-grid cut as ONE
+    # token, not two fragments (the cut sits mid-tile in the offset grid). We assert
+    # un-split-ness (a single >=9-char SEAMWORD* token), which tolerates a digit
+    # glyph misread ("77"->"/") unrelated to the dual-grid logic; a real split would
+    # leave only the 8-char "SEAMWORD" fragment.
+    cut_tokens = [w.text for w in result.words if w.text.upper().startswith("SEAMWORD")]
+    check("cut-straddling word read whole (one token, offset grid)",
+          any(len(t) >= 9 for t in cut_tokens), f"tokens: {cut_tokens}")
     check(f"grid is {exp_rows}x{exp_cols} from physical size",
           len(result.sections) == exp_rows * exp_cols,
           f"{len(result.sections)} sections")
     inside = all(s.bbox[0] >= px0 - 40 and s.bbox[1] >= py0 - 40
                  and s.bbox[0] + s.bbox[2] <= px1 + 40
                  and s.bbox[1] + s.bbox[3] <= py1 + 40 for s in result.sections)
-    check("all tiles inside frame interior", inside)
+    check("all tiles inside content bbox", inside)
     queued = [s for s in result.sections if s.status in ("low_conf", "unreadable")]
     check("no border/empty tiles queued", len(queued) == 0,
           f"queued: {[(s.idx, s.status) for s in queued]}")

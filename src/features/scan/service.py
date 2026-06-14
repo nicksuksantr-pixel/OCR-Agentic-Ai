@@ -28,12 +28,7 @@ RESCUE_MIN_WORD_CONF = 45.0  # rescue-variant words below this are noise (esp. i
 SUPPORTED_EXT = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp", ".pdf"}  # the one
                 # allow-list every ingest door (GUI picker, inbox watcher, API) checks against
 _SCAN_LOCK = threading.Lock()  # one scan at a time across GUI / inbox / API (v0.2.0)
-BLANK_MAX_INK = 0.004        # tile ink below this with no words = empty paper, skip rescue
-SEAM_MAX_INK = 0.0010        # seam strips are long + thin, so a single line of text crossing
-                             # the cut dilutes to ~0.004 over the whole strip — use a LOWER bar
-                             # than a square tile so a thin crossing label isn't skipped. Only
-                             # blank paper falls below; extra near-blank seam scans are cheap and
-                             # their words are conf-filtered + deduped, so nothing is ever lost (v0.2.8).
+BLANK_MAX_INK = 0.004        # tile ink below this with no words = empty paper, skip
 LINE_ONLY_MAX_INK = 0.02     # no words even after rescue + ink below this = just frame/border
                              # lines — do NOT queue for AI or keep a crop (v0.1.4, Nick:
                              # "it keeps photographing the document edges, what for?")
@@ -99,6 +94,16 @@ def _is_line_noise(text: str) -> bool:
     if len(t) == 1 and t in _NOISE_SINGLE:
         return True
     return set(t) <= {"|", "¦"}  # pipe runs like "|||"
+
+
+def _meaningful(words: list[Word]) -> list[Word]:
+    """Words minus standalone line-artifact tokens — the view the blank/line-only
+    tile verdicts must share with the post-stitch section verdict. If they don't
+    agree, a border tile whose only reads are noise ("|", "/") slips past the
+    line_only skip, then turns 'unreadable' once the noise is filtered downstream,
+    and gets queued — the empty-border AI waste we must not bring back now that the
+    whole sheet (incl. the border ring) is tiled (v0.2.9). See _is_line_noise."""
+    return [w for w in words if not _is_line_noise(w.text)]
 
 
 class ScanCancelled(Exception):
@@ -293,7 +298,7 @@ def _scan(source_path: str, job_dir: Path, job_id: int, settings: Settings,
           page_size_mm: tuple[float, float] | None = None,
           on_event=lambda e: None) -> JobResult:
     """The actual pipeline: orient → full pass → physical-size content grid →
-    per-section zoomed pass → seam pass → stitch."""
+    per-section zoomed pass → staggered offset-grid pass → stitch."""
     on_progress("Loading image...")
     if image is not None:
         img = image
@@ -347,9 +352,15 @@ def _scan(source_path: str, job_dir: Path, job_id: int, settings: Settings,
     # the block-layout pass misses; stitch-dedupe removes the doubles.
     full_words += engine.ocr_words(pre, langs, psm=SPARSE_PSM)
 
-    # Grid INSIDE the drawing frame (zone strips/borders are never tiled), with
-    # rows/cols decided by the real paper size whenever we know it.
-    interior = imaging.frame_interior(pre)
+    # Grid over the WHOLE inked drawing — content_bbox trims only blank paper,
+    # never document content. frame_interior used to crop to the innermost border
+    # line and ate real edge content (the left title-block strip on the Cummins
+    # CIB sheet — 643 px / 8.2% of the page); removed at Nick's call: "don't crop
+    # the document before scanning" (v0.2.9). Border/zone strips are still TILED,
+    # but the blank / line-only / ruled-only skips keep empty edge tiles out of
+    # the AI queue — nothing of the drawing is lost, nothing junky is queued.
+    # rows/cols still decided by the real paper size whenever we know it.
+    interior = imaging.content_bbox(pre)
     in_w, in_h = interior[2] - interior[0], interior[3] - interior[1]
     if page_size_mm:
         interior_mm = (in_w / pre.width * page_size_mm[0],
@@ -389,7 +400,10 @@ def _scan(source_path: str, job_dir: Path, job_id: int, settings: Settings,
         rescued = False
         rescue_method = None
         ink = imaging.ink_ratio(tile)
-        blank = not words and ink < BLANK_MAX_INK  # truly empty area, nothing to boost
+        # blank / line-only are judged on the NOISE-FILTERED words (see _meaningful)
+        # so a border/zone tile read as pure line-artifacts is skipped here, not
+        # queued downstream as 'unreadable' (v0.2.9, whole-sheet tiling).
+        blank = not _meaningful(words) and ink < BLANK_MAX_INK  # truly empty, nothing to boost
         # Rescue runs below the quality bar (rescue_trigger_conf), not just the queue bar —
         # mid-confidence sections get the deep treatment too.
         trigger = max(settings.rescue_trigger_conf, settings.low_conf_threshold)
@@ -404,8 +418,8 @@ def _scan(source_path: str, job_dir: Path, job_id: int, settings: Settings,
         # Tiles that are only frame/table LINES: nothing readable after every
         # rescue variant and the ink is straight ruled lines — not text. No AI
         # queue, no crop on disk (empty table cells used to burn AI quota).
-        line_only = not words and (ink < LINE_ONLY_MAX_INK
-                                   or imaging.ruled_only(tile))
+        line_only = not _meaningful(words) and (ink < LINE_ONLY_MAX_INK
+                                                or imaging.ruled_only(tile))
         on_event({"kind": "section_text", "idx": idx, "sections": len(boxes),
                   "text": " ".join(w.text for w in words),
                   "conf": int(round(mean_conf or 0))})
@@ -414,20 +428,26 @@ def _scan(source_path: str, job_dir: Path, job_id: int, settings: Settings,
                           rescue_method=rescue_method))
         all_words.extend(words)
 
-    # Seam pass — words sitting exactly on a grid cut are split across two
-    # tiles; a strip centred on every cut reads them whole, dedupe keeps the
-    # best copy (Nick: "สแกนระหว่างรอยต่อด้วยจะได้แม่นขึ้น").
-    strips = imaging.seam_strips(interior, x_cuts, y_cuts)
-    for n, strip in enumerate(strips):
+    # Offset second grid — Nick's red/blue dual-grid (v0.2.9). Staggered half a
+    # tile from the main grid so every main-grid cut sits in the MIDDLE of an
+    # offset tile and is read whole with full surrounding context. Replaces the
+    # old thin seam-strip pass (a full tile beats a strip). Word-harvest ONLY: it
+    # feeds the stitch and never creates its own sections / AI-queue work — the
+    # main grid owns the verdicts and crops. Sparse pass, words conf-filtered
+    # before they join the pool, then dedupe keeps the best copy per spot, so the
+    # extra coverage can only ADD good reads, never lose or duplicate one.
+    offset_boxes = imaging.offset_grid(interior, x_cuts, y_cuts, settings.overlap_pct)
+    for n, box in enumerate(offset_boxes):
         if control:
             control.checkpoint()
-        if imaging.ink_ratio(imaging.crop_section(pre, strip, zoom=1.0)) < SEAM_MAX_INK:
-            continue  # truly blank seam; a thin line of text on the cut exceeds this low bar
-        on_progress(f"Seam {n + 1}/{len(strips)}...")
-        zoom = _tile_zoom(strip)
-        seam_tile = imaging.crop_section(pre, strip, zoom=zoom)
-        raw = engine.ocr_words(seam_tile, langs, psm=SPARSE_PSM)
-        all_words.extend(w.shifted(strip[0], strip[1], scale=zoom) for w in raw
+        if imaging.ink_ratio(imaging.crop_section(pre, box, zoom=1.0)) < BLANK_MAX_INK:
+            continue  # blank offset tile — nothing to harvest
+        on_progress(f"Offset grid {n + 1}/{len(offset_boxes)}...")
+        on_event({"kind": "offset", "idx": n, "sections": len(offset_boxes), "bbox": box})
+        zoom = _tile_zoom(box)
+        otile = imaging.crop_section(pre, box, zoom=zoom)
+        raw = engine.ocr_words(otile, langs, psm=SPARSE_PSM)
+        all_words.extend(w.shifted(box[0], box[1], scale=zoom) for w in raw
                          if w.conf >= RESCUE_MIN_WORD_CONF)
 
     on_progress("Stitching...")
@@ -446,7 +466,7 @@ def _scan(source_path: str, job_dir: Path, job_id: int, settings: Settings,
     merged = [w for w in merged if not _is_line_noise(w.text)]
 
     # Section verdicts come AFTER the stitch, from the best merged knowledge —
-    # a tile that only saw half a label is fine when the seam pass or the full
+    # a tile that only saw half a label is fine when the offset grid or the full
     # pass read that area confidently (no more queueing already-solved tiles).
     sections: list[SectionResult] = []
     for t in tiles:
