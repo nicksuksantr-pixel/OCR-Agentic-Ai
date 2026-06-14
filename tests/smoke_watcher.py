@@ -9,8 +9,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import os as _os, tempfile as _tempfile  # noqa: E402 — isolate the test store
+# Own data dir (NOT the shared "ocr-agentic-tests"): the watcher owns the inbox
+# tree, so sharing it with sibling suites run back-to-back let a still-running
+# poll loop race their cleanup → "[WinError 2]" mid-move. Combined with stop()+
+# join() below, this suite is fully isolated.
 _os.environ.setdefault("OCR_AGENTIC_DATA_DIR",
-                       str(Path(_tempfile.gettempdir()) / "ocr-agentic-tests"))
+                       str(Path(_tempfile.gettempdir()) / "ocr-agentic-tests-watcher"))
 
 sys.stdout.reconfigure(encoding="utf-8")
 
@@ -46,6 +50,7 @@ def main() -> None:
     while not done and time.time() < deadline:
         time.sleep(0.3)
     watcher.stop()
+    watcher.join()  # let the in-flight _process()/_move() finish before asserting (no race)
 
     checks = {
         "job produced": bool(done),

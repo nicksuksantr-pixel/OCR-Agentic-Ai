@@ -48,6 +48,19 @@ class InboxWatcher:
     def stop(self) -> None:
         self._stop.set()
 
+    def join(self, timeout: float = 15.0) -> None:
+        """Block until the worker thread has finished its current cycle and exited.
+
+        For DETERMINISTIC teardown (tests): after stop()+join() no poll loop is
+        mid-`_process()`/`_move()`, so the assertions can't race a half-finished
+        move and a shared temp dir can't see a file vanish under `shutil.move`.
+        The product app deliberately does NOT join on quit — it relies on daemon
+        teardown + fail_orphans/resume (the audit's clean-cancel-on-quit item is a
+        separate, deferred product change); this helper changes no existing path."""
+        t = self._thread
+        if t is not None:
+            t.join(timeout)
+
     def _loop(self) -> None:
         while not self._stop.is_set():
             try:
