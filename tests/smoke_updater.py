@@ -29,6 +29,15 @@ def main() -> None:
                     "version compare 0.1.0 > 0.0.9")
     all_ok &= check(upd.parse_version("v0.0.10-beta") == (0, 0, 10), "junk suffix tolerated")
 
+    # is_newer = the ONLY update gate (v0.3.0). It must NOT consult any applied-tag
+    # record (that before-install write got installs permanently stuck reporting
+    # 'up to date'); a strictly-greater release wins, equal/older does not, and the
+    # carry boundary 0.2.9 -> 0.3.0 must read as newer.
+    all_ok &= check(upd.is_newer("v0.2.9", "v0.2.8"), "is_newer: newer release detected")
+    all_ok &= check(not upd.is_newer("v0.2.8", "v0.2.8"), "is_newer: same version not newer")
+    all_ok &= check(not upd.is_newer("v0.2.8", "v0.2.9"), "is_newer: older release not newer")
+    all_ok &= check(upd.is_newer("v0.3.0", "v0.2.9"), "is_newer: carry boundary 0.3.0 > 0.2.9")
+
     release = {"tag_name": "v0.1.0", "assets": [
         {"name": "Source code (zip)", "browser_download_url": "x"},
         {"name": "OCR-Agentic-Ai_Setup_v0.1.0.exe", "browser_download_url": "x"},
@@ -45,8 +54,9 @@ def main() -> None:
 
     bat = upd.make_apply_script(Path(r"C:\T\Setup.exe"), Path(r"C:\P\OCR-Agentic-Ai.exe"))
     text = bat.read_text(encoding="ascii")
-    all_ok &= check("/VERYSILENT" in text and "tasklist" in text
-                    and "OCR-Agentic-Ai.exe" in text, "apply script: wait + silent + relaunch")
+    all_ok &= check("/SILENT" in text and "/VERYSILENT" not in text and "tasklist" in text
+                    and "start " in text and "OCR-Agentic-Ai.exe" in text,
+                    "apply script: wait + VISIBLE install + relaunch")
     bat.unlink()
 
     # Updater stays inert without a configured repo (no thread, no staging)

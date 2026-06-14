@@ -8,9 +8,10 @@ Flow (all offline-safe, never blocks scanning):
      SHA-256 verified against the matching .sha256 asset (built by build.ps1).
   3. The update is STAGED, not forced — it installs the moment the app exits
      (quit from tray or window) via a detached script: wait for exit →
-     Setup /VERYSILENT → relaunch the app. No wizard, no questions.
-     One UAC consent popup is unavoidable (Program Files install — Windows
-     security, not ours to bypass).
+     Setup /SILENT (a VISIBLE progress window, so the user can see it happen and
+     does not reopen the old exe mid-install) → relaunch the app. No wizard
+     pages, but not invisible. One UAC consent popup is unavoidable (Program
+     Files install — Windows security, not ours to bypass).
 Dev runs (not frozen) only report; staging/applying needs a real install.
 Disabled until Settings.update_repo is set (e.g. "nick/OCR-Agentic-Ai").
 """
@@ -28,7 +29,6 @@ from src.core.config.settings import Settings
 
 ASSET_PREFIX = "OCR-Agentic-Ai_Setup_"   # release asset naming contract (build.ps1)
 APP_EXE_NAME = "OCR-Agentic-Ai.exe"
-APPLIED_PATH = paths.DATA_DIR / "applied_update.json"  # last tag we actually installed
 
 
 def parse_version(tag: str) -> tuple[int, int, int]:
@@ -44,18 +44,31 @@ def parse_version(tag: str) -> tuple[int, int, int]:
     return (nums[0], nums[1], nums[2])
 
 
-def _read_applied_tag() -> str | None:
-    """The release tag we last handed to the installer (None when never)."""
-    try:
-        return json.loads(APPLIED_PATH.read_text(encoding="utf-8")).get("tag") or None
-    except (OSError, json.JSONDecodeError, AttributeError):
-        return None
+def is_newer(latest_tag: str, current_tag: str) -> bool:
+    """True when `latest_tag` is a strictly newer release than `current_tag` —
+    the ONLY update gate (v0.3.0).
+
+    We deliberately do NOT also floor at the last tag handed to the installer
+    (the old `applied_update.json`): `apply_on_exit` recorded that tag BEFORE the
+    install actually ran, so a failed or UAC-dismissed install left the record
+    ABOVE the version that was really running, and the app then reported
+    'up to date' forever — permanently stuck on the old build, unable to update
+    (Nick, 2026-06-14: installed v0.2.8, record said v0.2.9, every check said
+    'v0.2.8 is the latest'). The padding loop that floor once guarded
+    ('v0.1.5.0' vs 'v0.1.5') is already handled by parse_version's fixed 3-tuple,
+    and an in-session re-download is guarded by `staged_setup`. Comparing against
+    the running build alone is sufficient AND self-healing: a failed install just
+    re-offers on the next start instead of latching off."""
+    return parse_version(latest_tag) > parse_version(current_tag)
 
 
-def _write_applied_tag(tag: str) -> None:
+def _cleanup_legacy_applied() -> None:
+    """Delete the pre-v0.3.0 `applied_update.json` if present. It is no longer
+    read (see is_newer); removing it un-sticks any install the old
+    write-before-install left poisoned (tag recorded above the version that
+    actually ended up installed)."""
     try:
-        APPLIED_PATH.parent.mkdir(parents=True, exist_ok=True)
-        APPLIED_PATH.write_text(json.dumps({"tag": tag}), encoding="utf-8")
+        (paths.DATA_DIR / "applied_update.json").unlink(missing_ok=True)
     except OSError:
         pass
 
@@ -102,15 +115,23 @@ def sha256_of(path: Path) -> str:
 
 
 def make_apply_script(setup_path: Path, app_exe: Path) -> Path:
-    """Write the detached updater script: wait for app exit → silent install → relaunch."""
+    """Write the detached updater script: wait for app exit → VISIBLE install →
+    relaunch. /SILENT (not /VERYSILENT) shows a progress window so the user can
+    SEE the update run — a fully invisible install left the app gone for a minute
+    with no sign of life, so people reopened the old exe mid-install and raced it,
+    and never knew when it finished (Nick, v0.3.0). The relaunch starts from the
+    install dir so the fresh exe comes up clean; the installer also relaunches as
+    a backstop and the single-instance mutex dedups any double launch."""
     bat = Path(tempfile.gettempdir()) / "ocr_agentic_apply_update.bat"
+    app_dir = app_exe.parent
     bat.write_text(
         "@echo off\n"
         ":wait\n"
         f"tasklist /FI \"IMAGENAME eq {APP_EXE_NAME}\" | find /I \"{APP_EXE_NAME}\" >nul "
         "&& (timeout /t 1 /nobreak >nul & goto wait)\n"
-        f"\"{setup_path}\" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART\n"
-        f"start \"\" \"{app_exe}\"\n"
+        f"\"{setup_path}\" /SILENT /SUPPRESSMSGBOXES /NORESTART\n"
+        "timeout /t 2 /nobreak >nul\n"
+        f"start \"\" /D \"{app_dir}\" \"{app_exe}\"\n"
         "del \"%~f0\"\n",
         encoding="ascii")
     return bat
@@ -132,6 +153,7 @@ class AutoUpdater:
         # UI-readable state: disabled | idle | checking | uptodate | available
         #                  | downloading | ready | error
         self.state: str = "idle"
+        _cleanup_legacy_applied()  # drop the poison-prone pre-v0.3.0 record (self-heal)
 
     # --- checking ------------------------------------------------------------
 
@@ -164,15 +186,10 @@ class AutoUpdater:
             return
         latest = release.get("tag_name", "")
         self.latest_tag = latest
-        # Skip anything not strictly newer than BOTH the running build and the
-        # last tag we already installed — a release that equals what we've
-        # installed is never re-downloaded, even if the frozen exe's reported
-        # version lags behind (duplicate-install guard, v0.2.0).
-        applied = _read_applied_tag()
-        floor = parse_version(self.version)
-        if applied:
-            floor = max(floor, parse_version(applied))
-        if parse_version(latest) <= floor:
+        # Update iff the newest release is strictly newer than the RUNNING build.
+        # (No applied-tag floor any more — that is what got installs permanently
+        # stuck; see is_newer.)
+        if not is_newer(latest, self.version):
             self.state = "uptodate"
             self.on_event(f"Up to date ({self.version} is the latest).")
             return
@@ -224,8 +241,6 @@ class AutoUpdater:
         when the script was started (caller should proceed to exit)."""
         if not (self.staged_setup and self.staged_setup.exists()):
             return False
-        if self.staged_tag:  # remember what we installed so we never re-install it
-            _write_applied_tag(self.staged_tag)
         app_exe = Path(sys.executable)
         bat = make_apply_script(self.staged_setup, app_exe)
         subprocess.Popen(

@@ -63,8 +63,12 @@ Root: HKLM; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; \
   Flags: uninsdeletevalue; Tasks: autostart
 
 [Run]
+; Relaunch after install. NOT skipifsilent — the auto-updater installs with
+; /SILENT and the app must still come back up (a missing relaunch made it look
+; like the update "killed" the app). This is a backstop to the apply script's own
+; relaunch; the single-instance mutex dedups a double launch. (v0.3.0)
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#MyAppName}}"; \
-  Flags: nowait postinstall skipifsilent
+  Flags: nowait postinstall
 
 [UninstallRun]
 ; Make sure the tray instance is gone before files are removed.
