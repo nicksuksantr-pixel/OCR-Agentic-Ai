@@ -175,6 +175,15 @@ def update_job_dir(job_id: int, job_dir: str) -> None:
         con.execute("UPDATE jobs SET job_dir=? WHERE id=?", (job_dir, job_id))
 
 
+def job_created_at(job_id: int) -> str | None:
+    """The job's creation timestamp (set in create_job) so result.json can carry
+    the SAME created_at as the DB row — not a second now() taken at persist time,
+    which for a multi-minute page differed from the DB by minutes (audit P3)."""
+    with _connect() as con:
+        row = con.execute("SELECT created_at FROM jobs WHERE id=?", (job_id,)).fetchone()
+        return row["created_at"] if row else None
+
+
 def jobs_for_source(source: str, include_archived: bool = False) -> list[dict]:
     """Every page-job of one Source file, page order — queried in SQL with NO
     arbitrary limit (the old code scanned list_jobs(500), so files past the

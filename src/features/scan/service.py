@@ -29,6 +29,11 @@ SUPPORTED_EXT = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp", ".pd
                 # allow-list every ingest door (GUI picker, inbox watcher, API) checks against
 _SCAN_LOCK = threading.Lock()  # one scan at a time across GUI / inbox / API (v0.2.0)
 BLANK_MAX_INK = 0.004        # tile ink below this with no words = empty paper, skip rescue
+SEAM_MAX_INK = 0.0010        # seam strips are long + thin, so a single line of text crossing
+                             # the cut dilutes to ~0.004 over the whole strip — use a LOWER bar
+                             # than a square tile so a thin crossing label isn't skipped. Only
+                             # blank paper falls below; extra near-blank seam scans are cheap and
+                             # their words are conf-filtered + deduped, so nothing is ever lost (v0.2.8).
 LINE_ONLY_MAX_INK = 0.02     # no words even after rescue + ink below this = just frame/border
                              # lines — do NOT queue for AI or keep a crop (v0.1.4, Nick:
                              # "it keeps photographing the document edges, what for?")
@@ -271,7 +276,8 @@ def _write_error_result(job_dir: Path, job_id: int, source_path: str,
     returns the error instead of a bare 404 (v0.2.0)."""
     payload = {"job_id": job_id, "source_path": source_path, "status": "error",
                "error": error,
-               "created_at": datetime.now().isoformat(timespec="seconds"),
+               "created_at": (store.job_created_at(job_id)
+                              or datetime.now().isoformat(timespec="seconds")),
                "full_text": "", "words": [], "sections": []}
     if page is not None:
         payload["page"], payload["pages"] = page, pages
@@ -415,8 +421,8 @@ def _scan(source_path: str, job_dir: Path, job_id: int, settings: Settings,
     for n, strip in enumerate(strips):
         if control:
             control.checkpoint()
-        if imaging.ink_ratio(imaging.crop_section(pre, strip, zoom=1.0)) < BLANK_MAX_INK:
-            continue  # nothing crosses this seam
+        if imaging.ink_ratio(imaging.crop_section(pre, strip, zoom=1.0)) < SEAM_MAX_INK:
+            continue  # truly blank seam; a thin line of text on the cut exceeds this low bar
         on_progress(f"Seam {n + 1}/{len(strips)}...")
         zoom = _tile_zoom(strip)
         seam_tile = imaging.crop_section(pre, strip, zoom=zoom)
@@ -544,7 +550,10 @@ def _persist(result: JobResult, settings: Settings) -> None:
 
     payload = {
         "job_id": result.job_id,
-        "created_at": datetime.now().isoformat(timespec="seconds"),
+        # Same timestamp as the DB row (set at job creation), not a second now()
+        # taken here at persist time — for a multi-minute page those differed by minutes.
+        "created_at": (store.job_created_at(result.job_id)
+                       or datetime.now().isoformat(timespec="seconds")),
         "source_path": result.source_path,
         "languages": settings.languages,
         "languages_used": result.languages_used or settings.languages,  # additive (v0.1.3)
