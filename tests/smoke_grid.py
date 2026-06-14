@@ -74,6 +74,53 @@ def make_text_tile() -> Image.Image:
     return img
 
 
+def _spans_full(intervals: list[tuple[int, int]], lo: int, hi: int) -> bool:
+    """True when the UNION of (start, end) intervals covers [lo, hi] with no gap.
+
+    The offset grid is staggered in BOTH axes, so a main-grid cut is not crossed
+    by one full-length tile — it is crossed by a STACK of offset tiles, each
+    spanning one band, that together run the whole interior side. That union is
+    what actually lets a cut-straddling label be read whole by *some* offset tile,
+    so the coverage contract is union-completeness, not a single spanning tile."""
+    cursor = lo
+    for s, e in sorted(intervals):
+        if s > cursor:           # a gap before this interval — a word here is split
+            return False
+        cursor = max(cursor, e)
+        if cursor >= hi:
+            return True
+    return cursor >= hi
+
+
+def _offset_covers_all_cuts() -> tuple[bool, str]:
+    """For real grid shapes, assert every main-grid cut is crossed by offset tiles
+    whose UNION spans the whole interior along that cut's length. Uses smart_grid
+    for real cut positions, then walks offset_grid's boxes. Returns (ok, detail)
+    for check(). This is the offset grid's true coverage contract — the thing the
+    end-to-end SEAMWORD assertion can't isolate (that word is also reachable by
+    the full-image pass / main-grid overlap, so SEAMWORD stays green even if the
+    offset grid regressed)."""
+    for rows, cols in ((3, 4), (2, 2), (7, 7), (3, 2), (1, 5), (5, 1)):
+        interior = (90, 70, 2309, 1609)
+        x0, y0, x1, y1 = interior
+        canvas = Image.new("L", (x1, y1), 255)
+        _, x_cuts, y_cuts = imaging.smart_grid(canvas, interior, rows, cols, 0.10)
+        boxes = imaging.offset_grid(interior, x_cuts, y_cuts, 0.10)
+        for xc in x_cuts:  # vertical cut: tiles straddling it must union to full height
+            straddle = [(by, by + bh) for bx, by, bw, bh in boxes if bx < xc < bx + bw]
+            if not straddle:
+                return False, f"{rows}x{cols}: vertical cut x={xc} not straddled at all"
+            if not _spans_full(straddle, y0, y1):
+                return False, f"{rows}x{cols}: vertical cut x={xc} has a height gap"
+        for yc in y_cuts:  # horizontal cut: straddling tiles must union to full width
+            straddle = [(bx, bx + bw) for bx, by, bw, bh in boxes if by < yc < by + bh]
+            if not straddle:
+                return False, f"{rows}x{cols}: horizontal cut y={yc} not straddled at all"
+            if not _spans_full(straddle, x0, x1):
+                return False, f"{rows}x{cols}: horizontal cut y={yc} has a width gap"
+    return True, "every main cut straddled by offset tiles spanning its full length"
+
+
 def main() -> None:
     paths.ensure_dirs()
     settings = settings_mod.load()
@@ -116,6 +163,26 @@ def main() -> None:
         profile[i] = 0.0
     cut = imaging.smart_cuts(profile, 2)[0]
     check("smart_cuts snaps to valley", 40 <= cut <= 60, f"cut at {cut}")
+
+    # --- offset-grid coverage GUARANTEE (v0.2.9, the red/blue dual grid) ---
+    # The end-to-end SEAMWORD check below proves a straddling word survives, but
+    # the full-image pass / main-grid overlap can read that word too — so it does
+    # NOT isolate the offset grid (it would stay green if offset_grid regressed).
+    # This deterministic check guards the offset grid's actual contract: EVERY
+    # main-grid cut is crossed by offset tiles whose UNION spans the interior
+    # along the cut's full length (the staggered grid tiles BOTH axes, so a cut is
+    # crossed by a stack of bands, not one full-length tile). Without that union,
+    # a label split by a cut could fall in a gap and be lost forever.
+    check("offset grid covers every main cut, full length",
+          *_offset_covers_all_cuts())
+    # Degenerate grids must not crash and must stay bounded (a 1-col page has no
+    # vertical cut to cover; the offset pass must still be valid, never explode).
+    deg = imaging.offset_grid((90, 70, 1200, 1609), [], [350, 700], 0.10)  # 1 column
+    check("offset grid safe on a 1-column grid (no x_cuts)",
+          isinstance(deg, list) and len(deg) > 0, f"{len(deg)} tiles")
+    deg1 = imaging.offset_grid((90, 70, 900, 800), [], [], 0.10)           # 1x1
+    check("offset grid safe & bounded on a 1x1 grid (no cuts)",
+          isinstance(deg1, list) and len(deg1) <= 4, f"{len(deg1)} tiles")
 
     # --- full pipeline on the framed sheet (A3 landscape physical size) ---
     print("\nScanning framed sheet (as A3 landscape)...")
