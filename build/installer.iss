@@ -2,7 +2,7 @@
 ; Compiled by build\build.ps1, which passes /DMyAppVersion=x.y.z
 ; Standard pro behaviors: modern wizard, versioned metadata, in-place upgrades
 ; (fixed AppId), running-app close, optional desktop icon + autostart,
-; silent-mode support for the auto-updater (/VERYSILENT), and an uninstaller
+; silent-mode support for the auto-updater (/SILENT), and an uninstaller
 ; that asks before touching user data.
 
 #ifndef MyAppVersion

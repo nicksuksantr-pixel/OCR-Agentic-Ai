@@ -21,7 +21,7 @@ GitHub Release (tag vX.Y.Z, both files attached)
   ⇓  daily check (data\update_check.json throttle)
 AutoUpdater (src\features\updater\service.py)
   newer tag → download to %TEMP% → verify SHA-256 → STAGE
-  on app quit → detached bat: wait-for-exit → Setup /VERYSILENT → relaunch
+  on app quit → detached bat: wait-for-exit → Setup /SILENT → relaunch
 ```
 
 ## Key points

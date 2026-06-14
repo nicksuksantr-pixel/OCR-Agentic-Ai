@@ -208,7 +208,7 @@ class AutoUpdater:
             download(setup["browser_download_url"], dest)
             if not sha:
                 # No .sha256 sibling on the release → refuse to stage. This binary is
-                # later run elevated and silent (/VERYSILENT) on exit, so installing
+                # later run elevated and silent (/SILENT) on exit, so installing
                 # it unverified would trust whatever the release serves. Every real
                 # release ships its checksum (build.ps1); a missing one is a pipeline
                 # slip or a tampered release — stop and require a manual update (v0.2.3).
