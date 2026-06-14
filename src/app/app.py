@@ -25,7 +25,7 @@ from src.features.watcher.service import InboxWatcher
 from src.shared.ui import theme, widgets
 
 APP_NAME = "OCR Agentic AI"
-APP_VERSION = "v0.2.6"  # carry rule: each place 0–9, carry at 9
+APP_VERSION = "v0.2.7"  # carry rule: each place 0–9, carry at 9
 UPDATE_RECHECK_MS = 6 * 60 * 60 * 1000  # re-check every 6 h so a tray-resident app still updates
 
 
