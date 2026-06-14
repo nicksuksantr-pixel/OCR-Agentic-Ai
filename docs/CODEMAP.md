@@ -126,5 +126,5 @@
 ### watcher
 - `src/features/watcher/service.py`
     • `class InboxWatcher` — Background thread that turns files dropped in inbox\ into Jobs.
-        ↳ running, start, stop
+        ↳ running, start, stop, join
 <!-- CODEMAP:AUTO:END -->
