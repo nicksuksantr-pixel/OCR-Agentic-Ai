@@ -14,6 +14,7 @@ from pathlib import Path
 from PIL import Image, ImageOps
 
 from src.core.config import paths
+from src.core.config.formats import SUPPORTED_EXT  # single ingest allow-list (audit P3)
 from src.core.config.settings import Settings
 from src.core.models.ocr import Word, SectionResult, JobResult
 from src.core.services import engine, gemini, store
@@ -25,8 +26,8 @@ PREVIEW_MAX = 1100  # live-preview thumbnail max side sent to the Scan tab (v0.2
 RESCUE_ZOOM = 4.0   # rescue pass looks even closer before giving up to the Boost Queue
 SPARSE_PSM = 11     # Tesseract sparse-text mode — scattered labels on drawings
 RESCUE_MIN_WORD_CONF = 45.0  # rescue-variant words below this are noise (esp. inverted runs)
-SUPPORTED_EXT = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp", ".pdf"}  # the one
-                # allow-list every ingest door (GUI picker, inbox watcher, API) checks against
+# SUPPORTED_EXT is imported from core.config.formats — the ONE allow-list every
+# ingest door (GUI picker, inbox watcher, API) + the /introduce handshake share.
 _SCAN_LOCK = threading.Lock()  # one scan at a time across GUI / inbox / API (v0.2.0)
 BLANK_MAX_INK = 0.004        # tile ink below this with no words = empty paper, skip
 LINE_ONLY_MAX_INK = 0.02     # no words even after rescue + ink below this = just frame/border
@@ -206,6 +207,15 @@ def run_source(source_path: str, settings: Settings,
                     on_event=lambda e, p=i + 1, t=total: on_event({**e, "page": p, "pages": t}))
             except ScanCancelled:
                 break  # finished pages stay valid; the cut-off job is marked error
+            except Exception as exc:
+                # One page failing must NOT abandon the rest of the batch. Only
+                # ScanCancelled used to be caught, so a transient render/OCR error
+                # on page i aborted pages i+1..N — and the unattended inbox door
+                # then dropped the WHOLE file to failed/, losing every later page
+                # (audit P1). run_job already recorded this page's error row +
+                # result.json; log it and carry on to the next page.
+                on_progress(f"Page {i + 1}/{total} failed ({exc!r}) — continuing to next.")
+                continue
             if on_page_done:
                 on_page_done(result)
             results.append(result)

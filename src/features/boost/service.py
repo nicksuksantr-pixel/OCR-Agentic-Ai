@@ -11,6 +11,7 @@ any model may be used. Free tier is hard-locked to FREE_MODEL regardless of
 what settings.gemini_model says.
 """
 import json
+import os
 import threading
 import time
 from dataclasses import dataclass, field
@@ -75,6 +76,15 @@ def _drain(settings: Settings, summary: "BoostRunSummary", on_progress) -> "Boos
     if repaired:
         on_progress(f"Recovered {repaired} earlier AI reading(s) into the Raw Extract.")
 
+    # Pick up sections left unclear while AI Boost was OFF / before a key was set —
+    # they had crops on disk + a low_conf/unreadable status but were never enqueued,
+    # so without this they could ONLY be boosted by a full multi-minute re-scan
+    # (audit P1: the persistent Boost Queue promise silently failed for them).
+    # Idempotent (NOT EXISTS guard) → safe to run at the start of every drain.
+    requeued = store.requeue_unclear_sections()
+    if requeued:
+        on_progress(f"Queued {requeued} earlier unclear section(s) for AI Boost.")
+
     items = store.pending_boost_items()
     if not items:
         summary.stopped_reason = "Boost Queue is empty."
@@ -83,6 +93,8 @@ def _drain(settings: Settings, summary: "BoostRunSummary", on_progress) -> "Boos
     # Free tier is locked to FREE_MODEL — paid models only after the unlock consent.
     model = settings.gemini_model if settings.paid_tier else FREE_MODEL
 
+    sent_this_run = False  # pace by ACTUAL sends, not the loop index — a skipped
+                           # item must not consume a throttle slot (audit P3)
     for n, item in enumerate(items):
         if not settings.paid_tier and _used_today() >= settings.boost_daily_cap:
             summary.stopped_reason = (f"Daily cap reached ({settings.boost_daily_cap} requests) — "
@@ -97,21 +109,24 @@ def _drain(settings: Settings, summary: "BoostRunSummary", on_progress) -> "Boos
             summary.failed += 1
             summary.errors.append(f"item {item['id']}: crop file missing")
             continue
-        if n > 0:
+        if sent_this_run:  # gap only BETWEEN real sends — free tier stays under 15 RPM
             time.sleep(PAID_SECONDS_BETWEEN_REQUESTS if settings.paid_tier
-                       else SECONDS_BETWEEN_REQUESTS)  # free: stay under 15 RPM
+                       else SECONDS_BETWEEN_REQUESTS)
 
         on_progress(f"Boosting section {item['section_idx']} of job {item['job_id']} "
                     f"({n + 1}/{len(items)})...")
         summary.sent += 1
-        _count_request()  # counts the attempt — quota is spent even when the call fails
+        _count_request()   # count the attempt; refunded below if the call never completes
+        sent_this_run = True
         try:
             ai_text = gemini.boost_section(item["crop_path"], item["local_text"], model)
         except Exception as exc:
             store.fail_boost(item["id"], requeue=True)  # requeue so a fix resumes it
             summary.sent -= 1
+            _uncount_request()  # the call raised before completing → it spent no real
+                                # quota; refunding keeps a flaky link (or a bad key)
+                                # from draining the soft daily cap on retries (audit P2/P3)
             if _is_auth_error(exc):
-                _uncount_request()  # a rejected key never spent real quota — don't burn the cap
                 summary.stopped_reason = ("Gemini rejected the key — check the API key in "
                                           "Settings (a free key also 429s on the paid tier).")
             else:
@@ -219,18 +234,32 @@ def used_today() -> int:
     return _used_today()
 
 
+def _write_usage(usage: dict) -> None:
+    """Atomic write (temp file + os.replace) so a crash or a partial read can never
+    leave a truncated usage file — _read_usage would treat that as count=0 and
+    silently reset the daily cap for the rest of the Pacific day (vessel power-loss
+    safe; audit P3). os.replace is atomic on the same NTFS volume."""
+    tmp = USAGE_PATH.with_suffix(".json.tmp")
+    try:
+        tmp.write_text(json.dumps(usage), encoding="utf-8")
+        os.replace(tmp, USAGE_PATH)
+    except OSError:
+        pass  # best-effort — a missed count only softens the cap, never blocks a scan
+
+
 def _count_request() -> None:
     with _USAGE_LOCK:  # read-modify-write must not lose increments under concurrency
         usage = _read_usage()
         usage["count"] += 1
-        USAGE_PATH.write_text(json.dumps(usage), encoding="utf-8")
+        _write_usage(usage)
 
 
 def _uncount_request() -> None:
-    """Refund a request counted before the call when it turned out to spend no
-    real quota (a rejected/invalid key fails pre-flight) — keeps the daily cap
-    honest so a wrong key can't exhaust it on retries (audit P2)."""
+    """Refund a request counted before the call when it turned out to spend no real
+    quota (a rejected/invalid key fails pre-flight, or the call never completed) —
+    keeps the daily cap honest so a wrong key / flaky link can't exhaust it on
+    retries (audit P2/P3)."""
     with _USAGE_LOCK:
         usage = _read_usage()
         usage["count"] = max(0, usage["count"] - 1)
-        USAGE_PATH.write_text(json.dumps(usage), encoding="utf-8")
+        _write_usage(usage)

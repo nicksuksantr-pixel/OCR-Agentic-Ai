@@ -185,14 +185,6 @@ def ask_yesno(parent, title: str, message: str, kind: str = "question") -> bool:
                             [("Yes", True, "primary"), ("No", False, "ghost")], kind))
 
 
-def ask_yesnocancel(parent, title: str, message: str, kind: str = "warn"):
-    """Returns True (yes) / False (no) / None (cancel) — matches the tkinter call
-    it replaces (e.g. delete this page / all pages / cancel)."""
-    return _run_dialog(parent, title, message,
-                       [("Yes", True, "primary"), ("No", False, "ghost"),
-                        ("Cancel", None, "ghost")], kind)
-
-
 def show_info(parent, title: str, message: str) -> None:
     _run_dialog(parent, title, message, [("OK", True, "primary")], "info")
 

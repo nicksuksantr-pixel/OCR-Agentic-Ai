@@ -11,6 +11,7 @@ removing fields is a breaking change (V-Log).
 from datetime import datetime
 
 from src.core.config import paths
+from src.core.config.formats import FORMAT_LIST  # single ingest allow-list (audit P3)
 from src.core.config.settings import Settings
 from src.core.services import store
 
@@ -53,7 +54,7 @@ def build_introduction(settings: Settings, version: str) -> dict:
                 "how": f"Drop an image file into {paths.INBOX_DIR} — it is scanned "
                        "automatically; the original moves to inbox/processed (or inbox/failed).",
                 "enabled": settings.watch_inbox,
-                "formats": ["png", "jpg", "jpeg", "bmp", "tif", "tiff", "webp", "pdf"],
+                "formats": FORMAT_LIST,
             },
             "api": {
                 "base_url": f"http://127.0.0.1:{settings.api_port}",

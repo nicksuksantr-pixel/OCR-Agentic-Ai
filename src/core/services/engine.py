@@ -13,9 +13,12 @@ from src.core.config import paths
 from src.core.config.settings import Settings
 from src.core.models.ocr import Word
 
-# Set once configure() has succeeded, so the inbox watcher and local API scan
-# paths can self-configure (via ensure_configured) without depending on the GUI.
-_configured = False
+# The settings.tesseract_path we last successfully configured for (None = not yet,
+# or the last attempt failed). The inbox watcher + local API self-configure via
+# ensure_configured without depending on the GUI; keying on the PATH (not a sticky
+# bool) is what makes a corrected or changed Tesseract path take effect in every
+# door mid-session instead of being ignored until restart (audit P2).
+_configured_path: str | None = None
 
 
 def configure(settings: Settings) -> str | None:
@@ -24,6 +27,7 @@ def configure(settings: Settings) -> str | None:
     Resolution order: explicit Settings path → bundled copy inside the installed
     app (zero external dependency for end users) → PATH lookup.
     """
+    global _configured_path
     exe = settings.tesseract_path
     if not Path(exe).exists():
         bundled = paths.bundled_tesseract()
@@ -33,6 +37,7 @@ def configure(settings: Settings) -> str | None:
         elif found:
             exe = found
         else:
+            _configured_path = None  # could not resolve — force a retry next call
             return ("Tesseract not found. Install it (winget install UB-Mannheim.TesseractOCR) "
                     "or set the path in Settings.")
     pytesseract.pytesseract.tesseract_cmd = exe
@@ -45,20 +50,19 @@ def configure(settings: Settings) -> str | None:
         if any(td.glob("*.traineddata")):
             os.environ["TESSDATA_PREFIX"] = str(td)
             break
+    _configured_path = settings.tesseract_path  # remember the INPUT we configured for
     return None
 
 
 def ensure_configured(settings: Settings) -> str | None:
-    """Configure the engine once if it hasn't been yet (idempotent). The inbox
-    watcher and the local API call run_job directly, so without this they relied
-    on the GUI's ScanView having run configure() first — a fragile construction-
-    order side-effect. Now every scan path configures the engine itself."""
-    global _configured
-    if _configured:
+    """Configure the engine for the watcher/API scan paths (which call run_job
+    directly, not through the GUI). Re-resolves whenever settings.tesseract_path
+    differs from what we last configured for, so a path the user fixes/changes in
+    Settings mid-session is picked up by every door — not cached until restart
+    (audit P2). A prior failure left _configured_path None, so it self-heals too."""
+    if _configured_path is not None and _configured_path == settings.tesseract_path:
         return None
-    err = configure(settings)
-    _configured = err is None
-    return err
+    return configure(settings)  # sets _configured_path itself on success
 
 
 def available_languages() -> list[str]:

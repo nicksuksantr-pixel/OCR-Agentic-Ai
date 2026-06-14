@@ -266,6 +266,33 @@ def queue_boost(job_id: int, section_id: int, crop_path: str, local_text: str) -
         con.execute("UPDATE sections SET status='queued' WHERE id=?", (section_id,))
 
 
+def requeue_unclear_sections() -> int:
+    """Enqueue every still-unclear section that has a saved crop but is NOT already
+    in the Boost Queue, and return how many were added.
+
+    This is what lets sections scanned while AI Boost was OFF (or before a key was
+    set) be sent to AI LATER without a full multi-minute re-scan — the persistent
+    Boost Queue the CONTEXT Hybrid-mode describes. Before, the only enqueue path was
+    a fresh scan with Boost already on, so anything scanned first was stranded on
+    disk forever (audit P1). Idempotent: a section already queued/boosted/ok is left
+    alone (the NOT EXISTS guard), so it is safe to call at the start of every drain.
+    A crop that has since been deleted is harmless — the drain skips a missing crop.
+    """
+    with _connect() as con:
+        rows = con.execute(
+            "SELECT s.id, s.job_id, s.crop_path FROM sections s "
+            "WHERE s.status IN ('low_conf','unreadable') AND s.crop_path IS NOT NULL "
+            "AND NOT EXISTS (SELECT 1 FROM boost_queue bq WHERE bq.section_id = s.id)"
+        ).fetchall()
+        now = datetime.now().isoformat(timespec="seconds")
+        for r in rows:
+            con.execute(
+                "INSERT INTO boost_queue (job_id, section_id, crop_path, local_text, created_at) "
+                "VALUES (?,?,?,?,?)", (r["job_id"], r["id"], r["crop_path"], "", now))
+            con.execute("UPDATE sections SET status='queued' WHERE id=?", (r["id"],))
+        return len(rows)
+
+
 def list_jobs(limit: int = 50) -> list[dict]:
     """Latest non-archived jobs for the UI list, newest first."""
     with _connect() as con:

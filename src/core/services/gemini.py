@@ -59,7 +59,13 @@ def boost_section(crop_path: str, local_text: str, model: str) -> str:
         raise RuntimeError("No GEMINI_API_KEY in .env — set it in Settings.")
 
     image_bytes = Path(crop_path).read_bytes()
-    client = genai.Client(api_key=key)
+    # Bounded request timeout (ms). Without it a connection that opens then stalls
+    # — common on a flaky marine/mobile link — never raises, so the boost drain
+    # blocks forever holding _DRAIN_LOCK and bricks every later boost run until the
+    # app restarts. A timeout turns that into the normal requeue-and-stop path
+    # (audit P2). Generous (2 min) so a slow upload is not a false failure.
+    client = genai.Client(api_key=key,
+                          http_options=types.HttpOptions(timeout=120_000))
     response = client.models.generate_content(
         model=model,
         contents=[

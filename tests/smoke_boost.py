@@ -47,12 +47,35 @@ def seed_job() -> tuple[int, dict]:
     return job_id, {"section_id": section_id, "job_dir": str(job_dir)}
 
 
+def seed_unclear_section() -> tuple[int, int]:
+    """A job with an unclear section that has a crop but was NEVER queued —
+    simulates scanning while AI Boost was OFF / before a key was set (audit P1)."""
+    job_dir = paths.JOBS_DIR / "job_smoke_requeue"
+    job_dir.mkdir(exist_ok=True)
+    crop = job_dir / "section_00.png"
+    Image.new("L", (300, 100), 255).save(crop)
+    jid = store.create_job("smoke_requeue_source.png", str(job_dir), "eng")
+    store.finish_job(jid, "x", 50.0)
+    sid = store.add_section(jid, 0, [0, 0, 300, 100], str(crop), 31.0, "low_conf")
+    return jid, sid
+
+
 def main() -> None:
     live = "--live" in sys.argv
     job_id, seeded = seed_job()
     settings = settings_mod.load()
     settings.ai_boost_enabled = True
     settings.paid_tier = False  # exercise the free-tier path (model lock + cap)
+
+    # --- audit P1: a section scanned while Boost was OFF (crop on disk, status
+    # unclear, never enqueued) must become boostable LATER without a re-scan ---
+    rq_jid, rq_sid = seed_unclear_section()
+    store.requeue_unclear_sections()
+    rq_status = next(s for s in store.get_job(rq_jid)["sections"]
+                     if s["id"] == rq_sid)["status"]
+    rq_before = len([i for i in store.pending_boost_items(1000) if i["job_id"] == rq_jid])
+    store.requeue_unclear_sections()  # 2nd call must NOT create a duplicate row
+    rq_after = len([i for i in store.pending_boost_items(1000) if i["job_id"] == rq_jid])
 
     # Isolation: drain ONLY the seeded item — never touch real pending queue rows
     # (v0.1.1 lesson: this test used to fake-answer the whole dev queue).
@@ -82,6 +105,8 @@ def main() -> None:
         "section status boosted": section["status"] == "boosted",
         "full_text got AI Boost block": "[AI Boost]" in (job["full_text"] or ""),
         "result.json got ai_boosts": bool(result_json.get("ai_boosts")),
+        "requeue enqueues an OFF-scanned unclear section": rq_status == "queued",
+        "requeue is idempotent (no duplicate row)": rq_before == 1 and rq_after == 1,
     }
     if not live:
         checks["ai_text matches fake"] = FAKE_ANSWER in (job["full_text"] or "")

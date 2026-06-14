@@ -12,11 +12,12 @@ import time
 from pathlib import Path
 
 from src.core.config import paths
+from src.core.config.formats import SUPPORTED_EXT as ALLOWED_EXT  # one shared allow-list (audit P3)
 from src.core.config.settings import Settings
+from src.core.services import store
 from src.features.scan import service as scan_service
 
 POLL_SECONDS = 2.0
-ALLOWED_EXT = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp", ".pdf"}
 
 
 class InboxWatcher:
@@ -76,13 +77,21 @@ class InboxWatcher:
     def _process(self, f: Path) -> None:
         """Scan one dropped file, then move it out of the inbox (never delete)."""
         self.on_event(f"Inbox: scanning {f.name}...")
+        src = str(f)
         try:
             # on_page_done streams each finished page so multi-page PDFs show up
             # (and auto-boost) page by page instead of after the whole file.
+            # skip_pages resumes a partially-done PDF (restart / re-drop) instead of
+            # re-scanning page 1 and duplicating its finished pages — the real
+            # duplicate bug the audit (P1) flagged. A re-dropped IMAGE is
+            # deliberately re-scanned: the unattended door can't prompt like the
+            # GUI's _already_scanned, doing nothing would look broken, and a
+            # single-image redo self-heals via fail_orphans + _clear_failed_attempts.
             results = scan_service.run_source(
-                str(f), self.settings,
+                src, self.settings,
                 on_progress=lambda m: self.on_event(f"Inbox {f.name}: {m}"),
-                on_page_done=self.on_job_done)
+                on_page_done=self.on_job_done,
+                skip_pages=store.done_pages(src))  # empty for images / fresh PDFs
         except Exception as exc:
             self._move(f, paths.INBOX_FAILED)
             self.on_event(f"Inbox: ❌ {f.name} failed — {exc}")
