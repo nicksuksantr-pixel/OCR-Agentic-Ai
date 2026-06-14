@@ -104,7 +104,7 @@ class ApiServer:
         elif parts == ["introduce"]:
             h._send(200, introduce.build_introduction(self.settings, self.version))
         elif parts == ["jobs"]:
-            limit = _query_int(query, "limit", 50)
+            limit = max(1, min(_query_int(query, "limit", 50), 1000))  # clamp: 0 hid all, huge loaded all
             h._send(200, store.list_jobs(limit=limit))
         elif len(parts) == 2 and parts[0] == "jobs" and parts[1].isdigit():
             job = store.get_job(int(parts[1]))
@@ -144,6 +144,10 @@ class ApiServer:
             source = str(body.get("path", "")).strip()
             if not source or not Path(source).is_file():
                 h._send(400, {"error": "body must be {\"path\": \"<existing image or PDF file>\"}"})
+                return
+            if Path(source).suffix.lower() not in scan_service.SUPPORTED_EXT:
+                h._send(400, {"error": f"unsupported file type '{Path(source).suffix}' — expected "
+                                       "an image or PDF (the GUI and inbox enforce the same list)"})
                 return
             if body.get("async"):
                 # Long PDFs can take minutes — async returns at once and the Heart

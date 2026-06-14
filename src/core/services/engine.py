@@ -13,6 +13,10 @@ from src.core.config import paths
 from src.core.config.settings import Settings
 from src.core.models.ocr import Word
 
+# Set once configure() has succeeded, so the inbox watcher and local API scan
+# paths can self-configure (via ensure_configured) without depending on the GUI.
+_configured = False
+
 
 def configure(settings: Settings) -> str | None:
     """Point pytesseract at tesseract.exe; return an error message or None if ready.
@@ -42,6 +46,19 @@ def configure(settings: Settings) -> str | None:
             os.environ["TESSDATA_PREFIX"] = str(td)
             break
     return None
+
+
+def ensure_configured(settings: Settings) -> str | None:
+    """Configure the engine once if it hasn't been yet (idempotent). The inbox
+    watcher and the local API call run_job directly, so without this they relied
+    on the GUI's ScanView having run configure() first — a fragile construction-
+    order side-effect. Now every scan path configures the engine itself."""
+    global _configured
+    if _configured:
+        return None
+    err = configure(settings)
+    _configured = err is None
+    return err
 
 
 def available_languages() -> list[str]:

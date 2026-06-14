@@ -25,6 +25,8 @@ PREVIEW_MAX = 1100  # live-preview thumbnail max side sent to the Scan tab (v0.2
 RESCUE_ZOOM = 4.0   # rescue pass looks even closer before giving up to the Boost Queue
 SPARSE_PSM = 11     # Tesseract sparse-text mode — scattered labels on drawings
 RESCUE_MIN_WORD_CONF = 45.0  # rescue-variant words below this are noise (esp. inverted runs)
+SUPPORTED_EXT = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp", ".pdf"}  # the one
+                # allow-list every ingest door (GUI picker, inbox watcher, API) checks against
 _SCAN_LOCK = threading.Lock()  # one scan at a time across GUI / inbox / API (v0.2.0)
 BLANK_MAX_INK = 0.004        # tile ink below this with no words = empty paper, skip rescue
 LINE_ONLY_MAX_INK = 0.02     # no words even after rescue + ink below this = just frame/border
@@ -213,6 +215,15 @@ def run_job(source_path: str, settings: Settings,
     `page_size_mm` = physical paper size (PDF pages); image files fall back to
     their DPI metadata, and pixel heuristics only when nothing is known.
     """
+    # Make the engine self-sufficient: the inbox watcher and the local API reach
+    # here without the GUI's ScanView having configured Tesseract first, so
+    # configure it ourselves (idempotent). Without this a scan via those doors
+    # threw a raw 'tesseract is not installed' whenever the GUI tab had not
+    # initialised the engine first (audit P1).
+    cfg_err = engine.ensure_configured(settings)
+    if cfg_err:
+        raise RuntimeError(cfg_err)
+
     # Resume hygiene: clear any previous error/processing attempt for this exact
     # page before re-scanning, so a resumed batch never piles up duplicate jobs
     # for the same page (audit: done_pages only saw 'done', so errored pages were
@@ -498,12 +509,13 @@ def _rescue(pre, box, langs: str, base_words: list[Word],
 
 def _persist(result: JobResult, settings: Settings) -> None:
     """Write result.json + DB rows; queue unclear sections for AI Boost."""
-    # Only enqueue boost work that can actually drain. With no Gemini key the
-    # sender stops immediately, so queueing here would just pile up undrainable
-    # rows (and the Scan tab already warns there is no key). The local Raw
+    # Only enqueue boost work that can actually drain: AI Boost must be ENABLED
+    # AND a key present. Checking the key alone (v0.2.5) still let the queue swell
+    # when the user turned Boost OFF but kept a key — the auto-drain (gated on
+    # ai_boost_enabled) would then never empty it (audit P2). The local Raw
     # Extract is still written in full below — nothing local is dropped, and the
-    # section crop stays on disk so a later key + re-scan can still boost it.
-    boost_ready = gemini.read_api_key() is not None
+    # section crop stays on disk so enabling Boost + a re-scan can still boost it.
+    boost_ready = settings.ai_boost_enabled and gemini.read_api_key() is not None
     for sec in result.sections:
         section_id = store.add_section(result.job_id, sec.idx, list(sec.bbox),
                                        sec.crop_path, sec.mean_conf, sec.status)

@@ -155,12 +155,14 @@ def _purge_processed_original(job: dict) -> None:
     name = source.replace("\\", "/").rsplit("/", 1)[-1]
     if not name:
         return
-    stem, _, ext = name.rpartition(".")
-    pattern = f"{stem}*.{ext}" if ext else name
+    # Exact basename only — a stem wildcard ("report*.pdf") would also match a
+    # DIFFERENT source's clash-renamed copy ("report_1.pdf" the watcher made for a
+    # second, unrelated "report.pdf") and delete that other source's processed
+    # original. A rare stale leftover is far better than erasing unrelated data (audit P3).
     try:
-        for f in paths.INBOX_PROCESSED.glob(pattern):
-            if f.is_file():
-                f.unlink(missing_ok=True)
+        target = paths.INBOX_PROCESSED / name
+        if target.is_file():
+            target.unlink(missing_ok=True)
     except OSError:
         pass
 

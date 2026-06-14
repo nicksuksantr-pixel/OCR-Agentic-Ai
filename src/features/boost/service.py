@@ -111,12 +111,26 @@ def _drain(settings: Settings, summary: "BoostRunSummary", on_progress) -> "Boos
             store.fail_boost(item["id"], requeue=True)  # requeue so a fix resumes it
             summary.sent -= 1
             if _is_auth_error(exc):
+                _uncount_request()  # a rejected key never spent real quota — don't burn the cap
                 summary.stopped_reason = ("Gemini rejected the key — check the API key in "
                                           "Settings (a free key also 429s on the paid tier).")
             else:
                 summary.stopped_reason = f"Send failed, item requeued: {exc}"
             summary.errors.append(repr(exc))
             break
+
+        # AI couldn't read it either: an empty answer or the model's own
+        # "(nothing readable)" sentinel must NOT close the section as boosted —
+        # that would silently drop an unread region (CONTEXT invariant) and write
+        # an empty "section N:" line into the Heart's Raw Extract. Mark the boost
+        # failed (not requeued — it would just fail again) and leave the section
+        # unresolved so a clearer re-scan or a human can still address it (audit P1).
+        if not ai_text or ai_text.lower() == "(nothing readable)":
+            store.fail_boost(item["id"], requeue=False)
+            summary.failed += 1
+            summary.errors.append(f"section {item['section_idx']} of job {item['job_id']}: "
+                                  "AI returned nothing readable")
+            continue
 
         # Answer + section-boosted + full_text merge in ONE transaction so a crash
         # can never leave the reading in boost_queue but absent from full_text.
@@ -159,7 +173,13 @@ def _update_result_json(job_dir: str, section_idx: int, ai_text: str) -> None:
     if f"\nsection {section_idx}:" not in ft:  # one [AI Boost] header, one line / section
         if "[AI Boost]" not in ft:
             ft += "\n\n[AI Boost]"
-        payload["full_text"] = ft + f"\nsection {section_idx}: {ai_text}"
+        # Collapse to ONE line: the guard above matches "\nsection N:", so a
+        # multi-line ai_text containing such a line could fake another section's
+        # header and make the guard drop that section's real reading (audit P1).
+        # Single-line text can only ever yield real headers. Raw multi-line text
+        # is preserved in the ai_boosts array above.
+        one_line = " ".join(ai_text.split())
+        payload["full_text"] = ft + f"\nsection {section_idx}: {one_line}"
         changed = True
     if changed:  # only rewrite when something was actually added (reconcile is cheap)
         result_path.write_text(json.dumps(payload, ensure_ascii=False, indent=1),
@@ -203,4 +223,14 @@ def _count_request() -> None:
     with _USAGE_LOCK:  # read-modify-write must not lose increments under concurrency
         usage = _read_usage()
         usage["count"] += 1
+        USAGE_PATH.write_text(json.dumps(usage), encoding="utf-8")
+
+
+def _uncount_request() -> None:
+    """Refund a request counted before the call when it turned out to spend no
+    real quota (a rejected/invalid key fails pre-flight) — keeps the daily cap
+    honest so a wrong key can't exhaust it on retries (audit P2)."""
+    with _USAGE_LOCK:
+        usage = _read_usage()
+        usage["count"] = max(0, usage["count"] - 1)
         USAGE_PATH.write_text(json.dumps(usage), encoding="utf-8")

@@ -426,7 +426,11 @@ def _merge_full_text(con: sqlite3.Connection, job_id: int, section_idx: int,
         return  # already merged — idempotent
     if "[AI Boost]" not in full_text:
         full_text += "\n\n[AI Boost]"
-    full_text += f"\nsection {section_idx}: {ai_text}"
+    # One line per section: the guard above matches "\nsection N:", so a multi-line
+    # ai_text containing such a line could spoof another section's header and drop
+    # its real reading. Collapsing to a single line makes that impossible (audit P1).
+    one_line = " ".join(ai_text.split())
+    full_text += f"\nsection {section_idx}: {one_line}"
     con.execute("UPDATE jobs SET full_text=? WHERE id=?", (full_text, job_id))
 
 

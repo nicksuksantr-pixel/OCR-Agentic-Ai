@@ -56,6 +56,22 @@ def main() -> None:
     checks["reconcile is idempotent"] = \
         store.get_job(jid2)["full_text"].count("RECOVER THIS READING") == 1
 
+    # 2b) v0.2.6: a multi-line AI reading is collapsed to ONE line, so an ai_text
+    #     that itself contains a "section N:"-looking line can NOT spoof the
+    #     idempotency guard into dropping a later section's real reading (audit P1).
+    jid3, sid3, item3 = _fresh_boost_job(5)
+    store.complete_boost_atomic(item3, sid3, jid3, 5, "FIVE LINE1\nsection 7: DECOY")
+    ft5 = store.get_job(jid3)["full_text"]
+    checks["multiline ai_text collapsed to one line"] = \
+        "section 5: FIVE LINE1 section 7: DECOY" in ft5
+    sid3b = store.add_section(jid3, 7, [0, 0, 10, 10], None, 40.0, "low_conf")
+    store.queue_boost(jid3, sid3b,
+                      str(paths.JOBS_DIR / f"job_{jid3:04d}" / "section_07.png"), "x")
+    item3b = next(i["id"] for i in store.pending_boost_items() if i["job_id"] == jid3)
+    store.complete_boost_atomic(item3b, sid3b, jid3, 7, "GENUINE SEVEN")
+    checks["decoy header does not drop real section 7"] = \
+        "section 7: GENUINE SEVEN" in store.get_job(jid3)["full_text"]
+
     # 3) additive secondary indexes exist (Open-Claw hot read path)
     con = sqlite3.connect(paths.DB_PATH)
     have = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='index'")}
@@ -63,7 +79,7 @@ def main() -> None:
     want = {"idx_words_job", "idx_sections_job", "idx_boost_status", "idx_jobs_archived"}
     checks["secondary indexes created"] = want <= have
 
-    for j in (jid, jid2):
+    for j in (jid, jid2, jid3):
         store.delete_job(j)
 
     failed = [n for n, ok in checks.items() if not ok]
