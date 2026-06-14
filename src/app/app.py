@@ -22,7 +22,7 @@ from src.features.settings.view import SettingsView
 from src.features.tray.service import TrayIcon
 from src.features.updater.service import AutoUpdater
 from src.features.watcher.service import InboxWatcher
-from src.shared.ui import theme
+from src.shared.ui import theme, widgets
 
 APP_NAME = "OCR Agentic AI"
 APP_VERSION = "v0.2.6"  # carry rule: each place 0–9, carry at 9
@@ -68,12 +68,21 @@ class App(ctk.CTk):
         self.update_label = ctk.CTkLabel(self.update_bar, text="", anchor="w",
                                          text_color="#ffffff", font=theme.font_h2())
         self.update_label.pack(side="left", padx=theme.M, pady=theme.XS)
-        ctk.CTkButton(self.update_bar, text="Later", width=64, height=26,
-                      fg_color="transparent", hover_color=theme.PRIMARY_HI,
-                      command=self._dismiss_update_bar).pack(side="right", padx=(0, theme.M), pady=theme.XS)
-        ctk.CTkButton(self.update_bar, text="⬇ Install & restart now", width=180, height=26,
-                      fg_color="#ffffff", text_color=theme.ACCENT, hover_color="#e6eefc",
-                      command=self._install_update_now).pack(side="right", padx=theme.XS, pady=theme.XS)
+        later_btn = ctk.CTkButton(self.update_bar, text="Later", width=64, height=26,
+                                  fg_color="transparent", hover_color=theme.PRIMARY_HI,
+                                  command=self._dismiss_update_bar)
+        later_btn.pack(side="right", padx=(0, theme.M), pady=theme.XS)
+        install_btn = ctk.CTkButton(self.update_bar, text="⬇ Install & restart now", width=180, height=26,
+                                    fg_color="#ffffff", text_color=theme.ACCENT, hover_color="#e6eefc",
+                                    command=self._install_update_now)
+        install_btn.pack(side="right", padx=theme.XS, pady=theme.XS)
+        # Hover help (the bar's buttons are terse): keep refs so the tooltips
+        # aren't garbage-collected (v0.2.6 nicety).
+        self._tip_later = widgets.add_tooltip(
+            later_btn, "Hide this bar — the update stays staged and still installs "
+                       "on a real Quit, or from Settings.")
+        self._tip_install = widgets.add_tooltip(
+            install_btn, "Close and reopen the app on the new version now.")
 
         self.tabs = ctk.CTkTabview(self)
         self.tabs.pack(fill="both", expand=True, padx=theme.S, pady=(theme.S, 0))
@@ -114,7 +123,7 @@ class App(ctk.CTk):
 
         self.tray = TrayIcon(APP_NAME,
                              on_open=lambda: self._post(self._show_window),
-                             on_quit=lambda: self._post(self._quit))
+                             on_quit=lambda: self._post(self._quit_from_tray))
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self.updater = AutoUpdater(
@@ -151,11 +160,31 @@ class App(ctk.CTk):
 
     # --- window / lifecycle ---------------------------------------------------
 
+    def _confirm_scan_interruption(self, action_label: str) -> bool:
+        """Guard a destructive lifecycle action (real quit / install-now) while a
+        scan is running. Returns True to proceed, False to abort.
+
+        On confirm we CANCEL the scan (just sets the cancel Event — we do NOT
+        join the worker, so the Tk loop never blocks) so the pipeline checkpoints
+        between sections/pages and every already-finished page stays committed.
+        When no scan is running this is a no-op that returns True, so quitting /
+        installing behaves exactly as before (v0.2.6)."""
+        if not self.scan_controller.busy:
+            return True
+        if not widgets.ask_yesno(
+                self, "A scan is running",
+                "A scan is still running — its current page will be lost "
+                f"(finished pages are already saved).\n\n{action_label} anyway?",
+                kind="warn"):
+            return False
+        self.scan_controller.cancel()  # non-blocking: worker checkpoints + commits
+        return True
+
     def _on_close(self) -> None:
         if self.settings.tray_enabled:
             self.tray.start()
             self.withdraw()
-        else:
+        elif self._confirm_scan_interruption("Quit"):
             self._quit()
 
     def _show_window(self) -> None:
@@ -169,6 +198,17 @@ class App(ctk.CTk):
         self.tray.stop()
         self.updater.apply_on_exit()
         self.destroy()
+
+    def _quit_from_tray(self) -> None:
+        """Tray-menu 'Quit'. Because tray is the default and _on_close hides to
+        tray (never reaching the guard), this is the PRIMARY mid-scan-loss path —
+        so it must run the same warning as _on_close's tray-disabled branch. The
+        callback is already marshalled onto the Tk thread by _post, so ask_yesno's
+        nested wait_window is safe here, exactly like _on_close. _quit() itself
+        stays unguarded so the install-now path (which prompts on its own) never
+        double-prompts and smoke_tray (which calls _quit directly) stays green."""
+        if self._confirm_scan_interruption("Quit"):
+            self._quit()
 
     def _on_settings_saved(self) -> None:
         """After a settings save / engine re-check: refresh the Scan-tab banners."""
@@ -197,6 +237,8 @@ class App(ctk.CTk):
         if not (self.updater.staged_setup and self.updater.staged_setup.exists()):
             self.log("UPDATE", "No update is staged yet — try 'Check now'.", "warn")
             return
+        if not self._confirm_scan_interruption("Install the update and restart"):
+            return  # user chose to finish the scan first
         self.log("UPDATE", "Installing update — the app will close and reopen...", "ok")
         self.update_label.configure(text="Installing — the app will restart...")
         self.update_idletasks()

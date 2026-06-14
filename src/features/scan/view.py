@@ -11,7 +11,7 @@ from PIL import Image, ImageDraw
 
 from src.core.config import paths
 from src.core.config.settings import Settings
-from src.core.services import gemini, store
+from src.core.services import engine, gemini, store
 from src.core.utils import pdfio
 from src.features.scan.controller import ScanController
 from src.shared.ui import theme, widgets
@@ -121,13 +121,37 @@ class ScanView(ctk.CTkFrame):
                 ("⚙ Open Settings", self._open_settings)])
             return
         self.pick_btn.configure(state="normal" if not self.controller.busy else "disabled")
-        if self.settings.ai_boost_enabled and not gemini.read_api_key():
+        # At most one banner shows (engine-missing already returned above). A
+        # missing selected OCR model is informational, not a hard block — the
+        # default is tha+eng and an English page reads on eng alone, so we inform
+        # and let the scan proceed (the pipeline now falls back to the installed
+        # languages). It takes priority over the AI-Boost-key warning (v0.2.6).
+        missing_langs = self._missing_languages()
+        if missing_langs:
+            names = ", ".join(f"'{m}'" for m in missing_langs)
+            self._show_banner(
+                f"⚠ Language {names} is selected but not installed — those pages "
+                "may read poorly; English pages still scan on 'eng'. "
+                "Add the model or switch language in Settings.", theme.WARN,
+                [("⚙ Open Settings", self._open_settings)])
+        elif self.settings.ai_boost_enabled and not gemini.read_api_key():
             self._show_banner(
                 "⚠ AI Boost is ON but no Gemini key is set — unclear sections will "
                 "queue but never be processed.", theme.WARN,
                 [("⚙ Open Settings", self._open_settings)])
         else:
             self.banner.pack_forget()
+
+    def _missing_languages(self) -> list[str]:
+        """Selected OCR languages tesseract can't load right now (engine already
+        confirmed ready). Empty when all are installed OR the language list can't
+        be read (don't cry wolf on an unknowable state) — installed .exe bundles
+        tha, so end users never see this; it guards portable/dev runs (v0.2.6)."""
+        installed = set(engine.available_languages())
+        if not installed:
+            return []
+        return [lang for lang in self.settings.languages.split("+")
+                if lang not in installed]
 
     def _show_banner(self, text: str, color: str, buttons: list) -> None:
         self.banner_label.configure(text=text, text_color=color)
@@ -186,9 +210,15 @@ class ScanView(ctk.CTkFrame):
         )
 
     def _already_scanned(self, path: str) -> bool:
-        """True when this exact image already has a finished job (re-scan guard)."""
+        """True when this exact image already has a finished job (re-scan guard).
+
+        include_archived=True so an ARCHIVED copy still prompts a re-scan, the
+        same way a PDF page that was archived is skipped on resume (done_pages
+        counts archived pages). Without this, an archived image was invisible
+        here and got silently re-scanned into a brand-new job (v0.2.6 parity)."""
         for variant in {path, path.replace("\\", "/"), path.replace("/", "\\")}:
-            if any(j["status"] == "done" for j in store.jobs_for_exact_source(variant)):
+            if any(j["status"] == "done"
+                   for j in store.jobs_for_exact_source(variant, include_archived=True)):
                 return True
         return False
 

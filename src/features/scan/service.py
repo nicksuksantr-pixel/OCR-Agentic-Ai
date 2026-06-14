@@ -313,6 +313,23 @@ def _scan(source_path: str, job_dir: Path, job_id: int, settings: Settings,
     on_progress("Full-image pass...")
     langs = settings.languages
     auto_lang = settings.auto_language and "tha" in settings.languages
+    # Offline-first guard: if a selected model isn't installed (e.g. tha.traineddata
+    # missing on a portable run), tesseract raises and the whole scan dies. Narrow
+    # the request to the languages tesseract can actually load so an English page
+    # still reads on 'eng'. available_languages() is queried ONCE here and reused
+    # for the run. We never invent a language; if the list can't be read (returns
+    # []), or nothing selected is installed, we leave langs untouched so the
+    # original clear engine error still surfaces (v0.2.6).
+    available = set(engine.available_languages())
+    if available:
+        selected = langs.split("+")
+        usable = [l for l in selected if l in available]
+        if usable and len(usable) < len(selected):
+            dropped = ", ".join(f"'{l}'" for l in selected if l not in available)
+            langs = "+".join(usable)
+            auto_lang = settings.auto_language and "tha" in langs
+            on_progress(f"Language {dropped} not installed — scanning with "
+                        f"'{langs}'.")
     full_words = engine.ocr_words(pre, langs)
     if auto_lang and latin_only_page(full_words):
         # English-only drawing: a tha+eng pass sprays stray Thai glyphs over the

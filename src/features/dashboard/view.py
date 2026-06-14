@@ -68,16 +68,23 @@ class DashboardView(ctk.CTkFrame):
         return label
 
     def _tick(self) -> None:
-        """Refresh all numbers; reschedules itself while the widget lives."""
+        """Refresh all numbers; reschedules itself while the widget lives.
+
+        Skips the work (store.stats DB read + inbox folder scans) when the
+        window is withdrawn to the tray or this tab is unmapped — a tray-resident
+        app must not query the DB and iterdir the inbox every 2 s for a view
+        nobody can see. The timer stays alive so refresh resumes instantly when
+        the window is shown again (v0.2.6)."""
         if not self.winfo_exists():
             return
-        try:
-            s = store.stats()  # one DB read per tick, shared by both stat cards
-            self._update_activity()
-            self._update_stats(s)
-            self._update_boost(s)
-        except Exception as exc:  # a hiccup must never kill the refresh loop
-            self.activity_label.configure(text=f"⚠ {exc}")
+        if self.winfo_ismapped():
+            try:
+                s = store.stats()  # one DB read per tick, shared by both stat cards
+                self._update_activity()
+                self._update_stats(s)
+                self._update_boost(s)
+            except Exception as exc:  # a hiccup must never kill the refresh loop
+                self.activity_label.configure(text=f"⚠ {exc}")
         self.after(REFRESH_MS, self._tick)
 
     def _update_activity(self) -> None:

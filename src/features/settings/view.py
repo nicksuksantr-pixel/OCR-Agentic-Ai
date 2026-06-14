@@ -221,9 +221,13 @@ class SettingsView(ctk.CTkFrame):
         self.install_btn.configure(state="normal" if state == "ready" else "disabled")
 
     def _update_status_tick(self) -> None:
+        # Skip the refresh while the window is hidden to the tray (or this tab is
+        # unmapped) — keep the timer alive so the label is correct the moment the
+        # window is shown again. Matches the Dashboard tick gating (v0.2.6).
         if not self.winfo_exists():
             return
-        self.refresh_update_status()
+        if self.winfo_ismapped():
+            self.refresh_update_status()
         self.after(2000, self._update_status_tick)
 
     def _install_now(self) -> None:

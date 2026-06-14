@@ -192,13 +192,18 @@ def jobs_for_source(source: str, include_archived: bool = False) -> list[dict]:
     return out
 
 
-def jobs_for_exact_source(source_path: str) -> list[dict]:
-    """Jobs whose source_path matches EXACTLY (one image, or one PDF page) —
-    used on resume to clear a previous error/processing attempt for that page
-    before re-scanning it, so resume never piles up duplicates."""
+def jobs_for_exact_source(source_path: str, include_archived: bool = False) -> list[dict]:
+    """Jobs whose source_path matches EXACTLY (one image, or one PDF page).
+
+    Default (archived excluded) is used on resume to clear a previous
+    error/processing attempt for that page before re-scanning, so resume never
+    piles up duplicates. `include_archived=True` also counts archived copies so
+    the single-image 're-scan?' guard agrees with done_pages, which treats an
+    archived page as 'I already have this' (recycle-bin model) — v0.2.6 parity."""
+    clause = "" if include_archived else " AND archived=0"
     with _connect() as con:
         rows = con.execute(
-            "SELECT id, status, job_dir FROM jobs WHERE source_path=? AND archived=0",
+            f"SELECT id, status, job_dir FROM jobs WHERE source_path=?{clause}",
             (source_path,)).fetchall()
         return [dict(r) for r in rows]
 
