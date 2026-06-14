@@ -114,11 +114,12 @@
 ### updater
 - `src/features/updater/service.py`
     • `parse_version(tag)` — 'v0.0.9' → (0, 0, 9); tolerant of missing 'v' and junk suffixes. ALWAYS a
+    • `is_newer(latest_tag, current_tag)` — True when `latest_tag` is a strictly newer release than `current_tag` —
     • `fetch_latest_release(repo, timeout)` — GET the latest release metadata from the GitHub API (None on any failure).
     • `pick_assets(release)` — Find the Setup exe asset and its optional .sha256 sibling.
     • `download(url, dest, timeout)` — 
     • `sha256_of(path)` — 
-    • `make_apply_script(setup_path, app_exe)` — Write the detached updater script: wait for app exit → silent install → relaunch.
+    • `make_apply_script(setup_path, app_exe)` — Write the detached updater script: wait for app exit → VISIBLE install →
     • `class AutoUpdater` — Owns the staged update state; App calls check_async() at start and
         ↳ check_async, apply_on_exit
 
