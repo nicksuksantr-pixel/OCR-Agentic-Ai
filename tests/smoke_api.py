@@ -11,9 +11,11 @@ _os.environ.setdefault("OCR_AGENTIC_DATA_DIR",
 
 sys.stdout.reconfigure(encoding="utf-8")
 
+from PIL import Image, ImageDraw, ImageFont
+
 from src.core.config import paths
 from src.core.config import settings as settings_mod
-from src.core.services import engine, store
+from src.core.services import engine, gemini, store
 from src.features.api.service import ApiServer
 
 TEST_PORT = 18765  # off the default so a running GUI never collides
@@ -32,6 +34,17 @@ def call(method: str, route: str, body: dict | None = None, token: str | None = 
             return resp.status, json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         return e.code, json.loads(e.read().decode("utf-8"))
+
+
+def _make_test_image(path: Path) -> None:
+    """Self-seed our OWN scannable image so this suite never depends on another
+    suite (smoke_pipeline) having seeded the shared store first — it must pass
+    standalone on a clean store, in any run order (Lucifer audit)."""
+    img = Image.new("L", (600, 160), 255)
+    ImageDraw.Draw(img).text((20, 60), "LOCAL API SMOKE VALVE V-12",
+                             font=ImageFont.truetype("arial.ttf", 30), fill=0)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    img.save(path)
 
 
 def main() -> None:
@@ -58,29 +71,34 @@ def main() -> None:
     print("introduce:", code_intro, "| role:", intro.get("role"),
           "| db:", intro.get("shared_store", {}).get("db_path", "")[-30:])
 
+    # Scan our self-seeded image FIRST so a real job exists for the jobs-list /
+    # detail / result checks below — independent of any other suite (Lucifer audit).
+    test_img = paths.DATA_DIR / "smoke_api_test.png"
+    _make_test_image(test_img)
+    code_scan, scan = call("POST", "/scan", {"path": str(test_img)}, token=token)
+    print("scan:", code_scan, {k: scan.get(k) for k in ("job_id", "mean_conf", "queued_sections")})
+    scanned_id = scan.get("job_id")
+
     code, jobs = call("GET", "/jobs?limit=3")
     print("jobs:", code, f"{len(jobs)} row(s)")
 
-    job_id = jobs[0]["id"] if jobs else None
+    job_id = scanned_id or (jobs[0]["id"] if jobs else None)
     code_detail, detail = call("GET", f"/jobs/{job_id}") if job_id else (0, {})
     code_result, _ = call("GET", f"/jobs/{job_id}/result") if job_id else (0, {})
     code_404, _ = call("GET", "/jobs/999999")
     code_unauth, _ = call("POST", "/boost/run")  # no token → must be 401
     code_bad, _ = call("POST", "/scan", {"path": "no_such_file.png"}, token=token)
 
-    test_img = paths.DATA_DIR / "smoke_test.png"
-    code_scan, scan = (call("POST", "/scan", {"path": str(test_img)}, token=token)
-                       if test_img.exists() else (0, {}))
-    print("scan:", code_scan, {k: scan.get(k) for k in ("job_id", "mean_conf", "queued_sections")})
-
-    # Endpoint check only — clear pending items first so the test NEVER sends
-    # real Gemini requests (live sends burned daily quota in earlier runs).
-    import sqlite3
-    con = sqlite3.connect(paths.DB_PATH)
-    con.execute("UPDATE boost_queue SET status = 'answered', "
-                "ai_text = '(cleared by smoke_api — never sent)' WHERE status = 'pending'")
-    con.commit()
-    con.close()
+    # Endpoint check only — force NO Gemini key so /boost/run returns at the key
+    # check BEFORE the drain and can NEVER send a real request. The old "clear the
+    # pending rows" guard is no longer enough: _drain now re-enqueues unclear
+    # sections at the start (store.requeue_unclear_sections, v0.3.0), which would
+    # re-fill the queue from the section this suite just scanned and hit the REAL
+    # API (a dev run reads the real key from the project .env). No-key is
+    # bulletproof and still exercises the route → 200. smoke_boost covers the real
+    # drain+merge with a faked gemini.boost_section. NEVER let a test send live
+    # (bug_v0.0.8 — live sends burned the daily quota; reintroduced by requeue).
+    gemini.read_api_key = lambda: None
     code_boost, boost = call("POST", "/boost/run", token=token)
     print("boost/run:", code_boost, boost.get("stopped_reason") or boost)
 
