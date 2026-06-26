@@ -104,6 +104,7 @@ fixed" before starting work, so the same mistake isn't repeated in another proje
 - **git-longpaths-deep-pubcache** (ScanDocs) — a deep MSIX-virtualized pub-cache path exceeds the Windows limit. `git config --global core.longpaths true`.
 - **grep-nul-false-negative** (Coddy) — ripgrep silently skips binary/NUL files; cross-check a "not found" with Read.
 - **in-agent-flutter-build-cannot-work** (ScanDocs) — the in-agent shell can't run the full Gradle/Flutter build (sandbox/loopback). Build via a Windows Scheduled Task; only analyze/test/deploy run in-agent.
+- **ps1-must-be-ascii** (SHIP-MONITORING) — non-ASCII in a `.ps1` (em-dash `—`, smart quotes, `→`, `·`) BREAKS the parser: Windows PowerShell reads a no-BOM file as the ANSI codepage, where the em-dash byte decodes to a smart double-quote (U+201D) that PS treats as a string delimiter -> cascading "missing }" / "unexpected token" errors far from the real spot. Keep PS source pure ASCII (or save UTF-8 *with* BOM); parse-check `[System.Management.Automation.Language.Parser]::ParseFile(...)` before trusting/shipping a script.
 
 ## ⚙️ Workflow / process / agents
 - **agent-hard-cap** (NotiWallet) — fan-out "1 agent per finding" burned 24→60 agents. ≤3/round · max 5 · >5 STOP+ask. FAIL = stop+report, never blind-retry; a single transient (e.g. SSL timeout) on a real upload may get ONE retry AFTER diagnosing — only loop-retrying fleets is banned.
